@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" != "application" ]]; then
+  echo "Usage: run application"
+  exit 1
+fi
+
+if [[ -f ".run_ui.pid" ]]; then
+  if kill -0 "$(cat .run_ui.pid)" >/dev/null 2>&1; then
+    echo "⚠️ UI is already running (PID $(cat .run_ui.pid))."
+    exit 0
+  fi
+fi
+
+PYTHON_BIN="python3"
+if [[ -x "./venv/bin/python" ]]; then
+  PYTHON_BIN="./venv/bin/python"
+fi
+
+nohup "$PYTHON_BIN" run_ui.py > run_ui.log 2>&1 &
+echo $! > .run_ui.pid
+echo "✅ UI started. Open http://127.0.0.1:8787"

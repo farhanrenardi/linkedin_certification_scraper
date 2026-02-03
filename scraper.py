@@ -1,11 +1,30 @@
-import re
-from fastapi import FastAPI
-from playwright.async_api import Route
+#!/usr/bin/env python3
+"""
+LinkedIn Certificate Scraper - CLI Standalone Version
 
-from linkedin_scraper.models import LinkedInRequest, CertificateItem
-from linkedin_scraper.browser import launch_browser, new_context, apply_stealth, connect_over_cdp
-from linkedin_scraper.cookies_auth import load_cookies, apply_cookies, check_login_status
-from linkedin_scraper.navigation import (
+A command-line tool to scrape LinkedIn certification data from a user-provided profile URL.
+Supports both local Playwright-launched browsers and remote CDP (Chrome DevTools Protocol) connections.
+
+Usage:
+    python scraper.py <LINKEDIN_URL> [OPTIONS]
+
+Example:
+    python scraper.py https://www.linkedin.com/in/johndoe/ --debug
+    python scraper.py https://www.linkedin.com/in/johndoe/ --use-cdp --cdp-url http://localhost:9222
+"""
+
+import asyncio
+import sys
+import json
+import argparse
+import re
+from pathlib import Path
+from typing import Optional
+
+from linkedin_scraper_pkg.models import LinkedInRequest, CertificateItem
+from linkedin_scraper_pkg.browser import launch_browser, new_context, apply_stealth, connect_over_cdp
+from linkedin_scraper_pkg.cookies_auth import load_cookies, apply_cookies, check_login_status
+from linkedin_scraper_pkg.navigation import (
     goto_with_retry,
     human_behavior,
     smooth_scroll_to,
@@ -14,16 +33,23 @@ from linkedin_scraper.navigation import (
     deep_scroll,
     random_delay,
 )
-from linkedin_scraper.selectors import find_cert_section, find_show_all_button
-from linkedin_scraper.extraction import extract_items
-from linkedin_scraper.response import build_response, build_error
-from linkedin_scraper.config import COOKIES_FILE, random_user_agent, BLOCK_IMAGES, USE_CDP, CDP_URL
-from linkedin_scraper.logging import save_debug_files
+from linkedin_scraper_pkg.selectors import find_cert_section, find_show_all_button
+from linkedin_scraper_pkg.extraction import extract_items
+from linkedin_scraper_pkg.response import build_response, build_error
+from linkedin_scraper_pkg.config import COOKIES_FILE, random_user_agent, BLOCK_IMAGES, USE_CDP, CDP_URL
+from linkedin_scraper_pkg import scraper_logging
 
-app = FastAPI()
 
-@app.post("/scrape/linkedin")
-async def scrape_linkedin(data: LinkedInRequest):
+async def scrape_linkedin(data: LinkedInRequest) -> dict:
+    """
+    Scrape LinkedIn certificates from the provided profile URL.
+    
+    Args:
+        data: LinkedInRequest object containing URL and scraping options
+        
+    Returns:
+        Dictionary containing scraped certificates and metadata
+    """
     if not data.url or "linkedin.com" not in data.url:
         return {"url": data.url, "found": False, "error": "Invalid URL"}
 
@@ -68,6 +94,7 @@ async def scrape_linkedin(data: LinkedInRequest):
 
     async def _wire_blockers(p):
         if BLOCK_IMAGES and not data.debug:
+            from playwright.async_api import Route
             async def _block_images(route: Route):
                 await route.abort()
             await p.route("**/*.{png,jpg,jpeg,gif,svg,ico}", _block_images)
@@ -98,7 +125,7 @@ async def scrape_linkedin(data: LinkedInRequest):
             print(f"❌ Navigation failed: {err}")
             return build_error(data, f"Navigation failed: {err}", debug_msg)
         if data.debug:
-            await save_debug_files(page, "landing")
+            await scraper_logging.save_debug_files(page, "landing")
 
         # Wait a bit for page to stabilize
         await page.wait_for_timeout(2000)
@@ -134,7 +161,7 @@ async def scrape_linkedin(data: LinkedInRequest):
                 if not ok:
                     return build_error(data, f"Navigation failed after CDP failover: {err}", debug_msg)
                 if data.debug:
-                    await save_debug_files(page, "landing_cdp")
+                    await scraper_logging.save_debug_files(page, "landing_cdp")
             else:
                 debug_msg.append("DOM_EMPTY_NO_FAILOVER")
 
@@ -146,7 +173,7 @@ async def scrape_linkedin(data: LinkedInRequest):
             print("⚠️ GUEST MODE - Limited access")
             debug_msg.append("GUEST_MODE")
             if data.debug:
-                await save_debug_files(page, "guest_mode")
+                await scraper_logging.save_debug_files(page, "guest_mode")
         else:
             print("✓ Logged in successfully")
             debug_msg.append("LOGGED_IN")
@@ -158,6 +185,7 @@ async def scrape_linkedin(data: LinkedInRequest):
         await deep_scroll(page)
 
         # Direct detail-page handling to avoid missing items on /details pages
+        import re
         is_detail_url = any(
             k in page.url or k in data.url for k in [
                 "details/certifications",
@@ -229,7 +257,7 @@ async def scrape_linkedin(data: LinkedInRequest):
                 debug_msg.append(f"DetailDirectErr:{str(e)[:30]}")
 
             if data.debug and len(extracted_certs) == 0:
-                debug_files = await save_debug_files(page, "detail_direct_empty")
+                debug_files = await scraper_logging.save_debug_files(page, "detail_direct_empty")
 
             debug_msg.append(f"FinalURL:{page.url}")
             print(f"✅ Scraping complete (detail direct): {len(extracted_certs)} certificates found")
@@ -244,8 +272,6 @@ async def scrape_linkedin(data: LinkedInRequest):
 
         # 3. FIND CERTIFICATE SECTION - Multiple strategies
         print("🔍 Searching for certificates section...")
-
-        # Optional: preview headings (kept minimal to avoid noisy logs)
 
         section = None
         section_found = False
@@ -280,7 +306,7 @@ async def scrape_linkedin(data: LinkedInRequest):
             if await err_locator.count() > 0:
                 debug_msg.append("ErrorPage:SomethingWentWrong")
                 if data.debug:
-                    await save_debug_files(page, "error_page")
+                    await scraper_logging.save_debug_files(page, "error_page")
                 await browser.close()
                 return build_error(data, "LinkedIn returned an error page (possible block/authwall)", debug_msg)
         except Exception:
@@ -390,7 +416,7 @@ async def scrape_linkedin(data: LinkedInRequest):
                             scraped_details = True
                             debug_msg.append("Scraped: DetailView")
                             if data.debug and not extracted_certs:
-                                await save_debug_files(page, "detail_empty")
+                                await scraper_logging.save_debug_files(page, "detail_empty")
                         else:
                             # If click failed but URL already moved to details by other means
                             if "details/" in page.url:
@@ -477,7 +503,7 @@ async def scrape_linkedin(data: LinkedInRequest):
                                 scraped_details = True
                                 debug_msg.append("Scraped:DetailViewRetry")
                                 if data.debug and not extracted_certs:
-                                    await save_debug_files(page, "detail_empty_retry")
+                                    await scraper_logging.save_debug_files(page, "detail_empty_retry")
                             else:
                                 if "details/" in page.url:
                                     await human_behavior(page)
@@ -596,7 +622,7 @@ async def scrape_linkedin(data: LinkedInRequest):
             extracted_certs = []
 
         if data.debug and len(extracted_certs) == 0:
-            debug_files = await save_debug_files(page, "no_results")
+            debug_files = await scraper_logging.save_debug_files(page, "no_results")
 
         print(f"✅ Scraping complete: {len(extracted_certs)} certificates found")
         return build_response(
@@ -615,5 +641,124 @@ async def scrape_linkedin(data: LinkedInRequest):
     finally:
         await _cleanup()
 
-@app.get("/health")
-def health(): return {"status": "ok"}
+
+def main():
+    """Main CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description="LinkedIn Certificate Scraper - Scrape certificates from LinkedIn profiles",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s https://www.linkedin.com/in/johndoe/
+  %(prog)s https://www.linkedin.com/in/johndoe/ --debug
+  %(prog)s https://www.linkedin.com/in/johndoe/ --use-cdp --cdp-url http://localhost:9222
+  %(prog)s https://www.linkedin.com/in/johndoe/ --headless false --max-wait 30000
+        """
+    )
+    
+    parser.add_argument(
+        "url",
+        help="LinkedIn profile URL to scrape (e.g., https://www.linkedin.com/in/username/)"
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode to save screenshots and detailed logs"
+    )
+    parser.add_argument(
+        "--headless",
+        type=lambda x: x.lower() in ("true", "1", "yes"),
+        default=True,
+        help="Run browser in headless mode (default: true)"
+    )
+    parser.add_argument(
+        "--max-wait",
+        type=int,
+        default=25000,
+        help="Maximum wait time in milliseconds for page loads (default: 25000)"
+    )
+    parser.add_argument(
+        "--use-cdp",
+        action="store_true",
+        help="Use Chrome DevTools Protocol (CDP) for remote browser connection"
+    )
+    parser.add_argument(
+        "--cdp-url",
+        default="http://127.0.0.1:9222",
+        help="CDP endpoint URL (default: http://127.0.0.1:9222)"
+    )
+    parser.add_argument(
+        "--detail-only",
+        action="store_true",
+        help="Only scrape from detail pages (/details/certifications/)"
+    )
+    parser.add_argument(
+        "--proxy",
+        help="Proxy URL to use for requests (e.g., http://proxy.example.com:8080)"
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        help="Output file path (JSON format). If not specified, prints to stdout"
+    )
+    parser.add_argument(
+        "--cookies",
+        help="Path to cookies.json file. If not specified, uses default location"
+    )
+    
+    args = parser.parse_args()
+    
+    # Validate URL
+    if not args.url.startswith("http"):
+        args.url = f"https://{args.url}"
+    
+    if "linkedin.com" not in args.url:
+        print(f"❌ Error: URL must be a LinkedIn profile URL")
+        sys.exit(1)
+    
+    # Override cookies path if provided
+    if args.cookies:
+        import linkedin_scraper_pkg.config as config
+        config.COOKIES_FILE = args.cookies
+    
+    # Create request object
+    request_data = LinkedInRequest(
+        url=args.url,
+        debug=args.debug,
+        headless=args.headless,
+        max_wait=args.max_wait,
+        use_cdp=args.use_cdp,
+        cdp_url=args.cdp_url,
+        detail_only=args.detail_only,
+        proxy=args.proxy,
+    )
+    
+    # Run scraper
+    try:
+        result = asyncio.run(scrape_linkedin(request_data))
+        
+        # Output result
+        if args.output:
+            with open(args.output, "w") as f:
+                json.dump(result, f, indent=2)
+            print(f"\n📁 Results saved to: {args.output}")
+        else:
+            print("\n📊 Scraping Results:")
+            print(json.dumps(result, indent=2))
+        
+        # Exit with appropriate code
+        if result.get("found", False) or result.get("certificates"):
+            sys.exit(0)
+        else:
+            sys.exit(1)
+            
+    except KeyboardInterrupt:
+        print("\n⚠️ Interrupted by user")
+        sys.exit(130)
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

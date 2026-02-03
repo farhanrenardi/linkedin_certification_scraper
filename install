@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" != "needs" ]]; then
+  echo "Usage: install needs"
+  exit 1
+fi
+
+PYTHON_BIN="python3"
+if [[ -x "./venv/bin/python" ]]; then
+  PYTHON_BIN="./venv/bin/python"
+else
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+  elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+  fi
+fi
+
+if [[ ! -d "./venv" ]]; then
+  "$PYTHON_BIN" -m venv venv
+  PYTHON_BIN="./venv/bin/python"
+fi
+
+"$PYTHON_BIN" -m pip install --upgrade pip
+"$PYTHON_BIN" -m pip install -r requirements.txt
+"$PYTHON_BIN" -m playwright install chromium
+
+echo "✅ Dependencies installed."

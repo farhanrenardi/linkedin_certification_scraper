@@ -1,522 +1,293 @@
 # LinkedIn Certificate Scraper
 
-Service Python FastAPI untuk scraping data sertifikat dari profil LinkedIn dengan pendekatan modular yang aman dan efisien.
+A powerful web scraping tool that automatically extracts professional certifications and licenses from LinkedIn profiles. Built with Python, Playwright, and FastAPI.
 
-## 📋 Daftar Isi
+![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
+![Playwright](https://img.shields.io/badge/Playwright-1.40+-green.svg)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-teal.svg)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)
+![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-- [Arsitektur](#arsitektur)
-- [Instalasi](#instalasi)
-- [Konfigurasi](#konfigurasi)
-- [Menjalankan Service](#menjalankan-service)
-- [Integrasi dengan n8n](#integrasi-dengan-n8n)
-- [Struktur Modular](#struktur-modular)
-- [Keamanan & Best Practices](#keamanan--best-practices)
-- [Troubleshooting](#troubleshooting)
+## Features
 
----
+- **Cross-Platform** - Works on Windows, macOS, and Linux
+- **Web UI Interface** - Clean, intuitive browser-based interface
+- **Batch Processing** - Upload CSV/Excel files with multiple LinkedIn URLs
+- **Single URL Scraping** - Quick scraping of individual profiles
+- **CDP Integration** - Uses Chrome DevTools Protocol for reliable browser automation
+- **Human-like Behavior** - Implements realistic scrolling and delays to avoid detection
+- **Stealth Mode** - Bypasses bot detection using playwright-stealth
+- **Export to CSV** - Download results in CSV format for further analysis
 
-## Arsitektur
-
-Service ini menggunakan **modular architecture** untuk meningkatkan reliability, maintainability, dan testing. Setiap modul memiliki tanggung jawab yang jelas dan terisolasi.
+## Demo
 
 ```
-python_service/
-├── app.py                      # FastAPI endpoint orchestrator
-├── cookies.json                # LinkedIn session cookies (REQUIRED)
-├── requirements.txt            # Python dependencies
-├── Dockerfile                  # Container configuration
-└── scraper/                    # Modular scraper package
-    ├── __init__.py
-    ├── models.py               # Request/response schemas
-    ├── config.py               # Configuration & constants
-    ├── browser.py              # Browser launch & stealth
-    ├── cookies_auth.py         # Cookie handling & auth detection
-    ├── navigation.py           # Navigation & human behavior simulation
-    ├── selectors.py            # Section & element finding strategies
-    ├── extraction.py           # Certificate data extraction
-    ├── response.py             # Response building
-    └── logging.py              # Debug artifacts & logging
+┌─────────────────────────────────────────────────────────────┐
+│  LinkedIn Certificate Scraper                               │
+│                                                             │
+│  Step 1: Open LinkedIn                                      │
+│  [Open LinkedIn in Chrome]                                  │
+│                                                             │
+│  Step 2: Scrape Certificates                                │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ Upload CSV/Excel or enter LinkedIn URL              │   │
+│  └─────────────────────────────────────────────────────┘   │
+│  [Start Scraping]                                           │
+│                                                             │
+│  Results                               [Download CSV]       │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ URL          │ Certificates                         │   │
+│  │ linkedin.com │ [{name: "AWS", issuer: "Amazon"}]    │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
 ```
 
----
+## Tech Stack
 
-## Instalasi
+| Component | Technology |
+|-----------|------------|
+| Backend | Python 3.10+, FastAPI, Uvicorn |
+| Browser Automation | Playwright, Playwright-Stealth |
+| Data Processing | Pandas, BeautifulSoup4, lxml |
+| Data Validation | Pydantic |
+| Frontend | Embedded HTML/CSS/JavaScript |
 
-### Prasyarat
-- Python 3.11+
-- Docker & Docker Compose (untuk deployment)
-- LinkedIn account dengan cookies valid
+## Installation
 
-### Local Development
+### Prerequisites
+
+- Python 3.10 or higher
+- Google Chrome browser installed
+- Git (for cloning)
+
+### Quick Setup
+
+**macOS / Linux:**
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/linkedin_certification_scraper.git
+cd linkedin_certification_scraper
+
+# Run the installer
+./install needs
+```
+
+**Windows (PowerShell):**
+```powershell
+# Clone the repository
+git clone https://github.com/yourusername/linkedin_certification_scraper.git
+cd linkedin_certification_scraper
+
+# Run the installer
+.\install.ps1 needs
+```
+
+The installer will:
+1. Create a Python virtual environment
+2. Install all required dependencies
+3. Download Playwright browsers (Chromium)
+
+## Usage
+
+### Starting the Application
+
+**macOS / Linux:**
+```bash
+./run application
+```
+
+**Windows (PowerShell):**
+```powershell
+.\run.ps1 application
+```
+
+This command will:
+- Start Chrome with CDP (Chrome DevTools Protocol) on port 9222
+- Launch the web UI server on http://127.0.0.1:8787
+- Open the UI in your default browser
+
+### Scraping Workflow
+
+1. **Open LinkedIn** - Click "Open LinkedIn in Chrome" to open LinkedIn in the CDP browser
+2. **Login** - Log in to your LinkedIn account in the Chrome window
+3. **Enter URLs** - Either:
+   - Upload a CSV/Excel file containing LinkedIn profile URLs
+   - Enter a single LinkedIn profile URL directly
+4. **Start Scraping** - Click "Start Scraping" and wait for results
+5. **Download** - View results in the table and download as CSV
+
+### Stopping the Application
+
+**macOS / Linux:**
+```bash
+./stop
+```
+
+**Windows (PowerShell):**
+```powershell
+.\stop.ps1
+```
+
+## Project Structure
+
+```
+linkedin_certification_scraper/
+├── linkedin_scraper_pkg/       # Core scraping modules
+│   ├── __init__.py
+│   ├── browser.py              # Browser launch & CDP connection
+│   ├── config.py               # Configuration settings
+│   ├── cookies_auth.py         # Cookie-based authentication
+│   ├── extraction.py           # Certificate data extraction
+│   ├── models.py               # Pydantic data models
+│   ├── navigation.py           # Page navigation & scrolling
+│   ├── response.py             # Response formatting
+│   ├── scraper_logging.py      # Debug logging utilities
+│   └── selectors.py            # DOM element selectors
+├── ui_app.py                   # FastAPI web UI application
+├── run_ui.py                   # Application launcher with CDP
+├── scraper.py                  # CLI interface
+├── install                     # Installation script (macOS/Linux)
+├── install.ps1                 # Installation script (Windows)
+├── run                         # Start script (macOS/Linux)
+├── run.ps1                     # Start script (Windows)
+├── stop                        # Stop script (macOS/Linux)
+├── stop.ps1                    # Stop script (Windows)
+├── example.csv                 # Example input file
+└── requirements.txt            # Python dependencies
+```
+
+## Configuration
+
+Environment variables can be used to customize behavior:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `UI_HOST` | `127.0.0.1` | Web UI host address |
+| `UI_PORT` | `8787` | Web UI port |
+| `SCRAPER_CDP_PORT` | `9222` | Chrome CDP port |
+| `SCRAPER_USE_CDP` | `true` | Enable CDP mode |
+| `CHROME_PATH` | Auto-detect | Custom Chrome executable path |
+
+## API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/` | Web UI interface |
+| `POST` | `/api/open-linkedin` | Open LinkedIn in CDP browser |
+| `POST` | `/api/scrape` | Scrape certificates from URLs |
+
+### Example API Usage
 
 ```bash
-cd python_service
+# Open LinkedIn in Chrome
+curl -X POST http://127.0.0.1:8787/api/open-linkedin
 
-# Install dependencies
-pip install -r requirements.txt
+# Scrape a single profile
+curl -X POST http://127.0.0.1:8787/api/scrape \
+  -F "url=https://www.linkedin.com/in/username/"
 
-# Install Playwright browsers
-playwright install chromium
+# Scrape from file
+curl -X POST http://127.0.0.1:8787/api/scrape \
+  -F "file=@profiles.csv"
 ```
 
-### Docker Deployment
+## Output Format
 
-```bash
-# Build dan run dengan docker-compose
-docker compose up --build
+The scraper extracts the following certificate information:
 
-# Atau build manual
-docker build -t linkedin-scraper .
-docker run -p 8000:8000 linkedin-scraper
-```
-
----
-
-## Konfigurasi
-
-### 1. Setup Cookies (WAJIB)
-
-**PENTING**: Service ini membutuhkan cookies LinkedIn yang valid untuk akses authenticated.
-
-#### Cara mendapatkan cookies:
-
-1. Login ke LinkedIn di browser (Chrome/Firefox)
-2. Buka Developer Tools (F12) → Application/Storage → Cookies
-3. Export semua cookies untuk domain `linkedin.com`
-4. Simpan sebagai `cookies.json` di folder `python_service/`
-
-**Format cookies.json:**
-
-```json
-[
-  {
-    "name": "li_at",
-    "value": "AQEDAxxxxxxxxxxxxxxxxxxxxxxxxx",
-    "domain": ".linkedin.com",
-    "path": "/",
-    "expires": 1735689600,
-    "httpOnly": true,
-    "secure": true,
-    "sameSite": "None"
-  },
-  {
-    "name": "JSESSIONID",
-    "value": "ajax:xxxxxxxxxxxxxxxxxx",
-    "domain": ".linkedin.com",
-    "path": "/",
-    "secure": true
-  }
-]
-```
-
-**⚠️ Perhatian:**
-- Cookie `li_at` adalah yang PALING PENTING untuk autentikasi
-- Jangan share cookies ke pihak lain (rahasia perusahaan!)
-- Cookies akan expire, perlu di-refresh berkala
-- Gunakan akun dengan LinkedIn Premium/Sales Navigator untuk hasil terbaik
-
-### 2. Environment Variables (Opsional)
-
-Buat file `.env` di root project:
-
-```env
-# Cookie file path
-LINKEDIN_COOKIES_PATH=cookies.json
-
-# Default settings (bisa di-override lewat request body)
-SCRAPER_HEADLESS_DEFAULT=true
-SCRAPER_MAX_WAIT=25000
-SCRAPER_TZ=Asia/Jakarta
-
-# Proxy (jika diperlukan untuk production scale)
-SCRAPER_PROXY=http://your-residential-proxy:port
-```
-
----
-
-## Menjalankan Service
-
-### Local (Development)
-
-```bash
-cd python_service
-uvicorn app:app --host 0.0.0.0 --port 8000 --reload
-```
-
-Service akan berjalan di `http://localhost:8000`
-
-### Docker Compose (Production)
-
-```bash
-docker compose up -d
-```
-
-### Health Check
-
-```bash
-curl http://localhost:8000/health
-# Response: {"status": "ok"}
-```
-
----
-
-## Integrasi dengan n8n
-
-### 1. Setup HTTP Request Node
-
-Di n8n workflow, tambahkan **HTTP Request** node dengan konfigurasi:
-
-**Method**: `POST`  
-**URL**: `http://python_service:8000/scrape/linkedin` (jika satu network Docker)  
-atau `http://localhost:8000/scrape/linkedin` (jika n8n di host lain)
-
-**Headers**:
-```json
-{
-  "Content-Type": "application/json"
-}
-```
-
-**Body** (JSON):
-```json
-{
-  "url": "https://www.linkedin.com/in/username",
-  "keyword": null,
-  "debug": false,
-  "headless": true,
-  "max_wait": 25000,
-  "detail_only": false,
-  "click_show_all": true,
-  "proxy": null
-}
-```
-
-### 2. Request Fields Explanation
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `url` | string | ✅ Yes | - | LinkedIn profile URL |
-| `keyword` | string | ❌ No | null | (Reserved for future filtering) |
-| `debug` | boolean | ❌ No | false | Enable debug screenshots/HTML |
-| `headless` | boolean | ❌ No | true | Run browser in headless mode |
-| `max_wait` | integer | ❌ No | 25000 | Max wait time in milliseconds |
-| `detail_only` | boolean | ❌ No | false | Jump directly to details page |
-| `click_show_all` | boolean | ❌ No | true | Try to expand full certificate list |
-| `proxy` | string | ❌ No | null | Proxy server URL |
-
-### 3. Response Format
-
-**Success Response:**
 ```json
 {
-  "url": "https://www.linkedin.com/in/username",
-  "keyword": null,
-  "found": true,
-  "total_certificates": 5,
-  "certificates_list": [
-    {
-      "certificate_name": "AWS Certified Solutions Architect",
-      "credential_id": "ABC123XYZ",
-      "issuer": "Amazon Web Services",
-      "issue_date": "Issued Jan 2024",
-      "expiry_date": "Expires Jan 2027",
-      "verify_link": "https://www.credly.com/badges/...",
-      "source": "DetailView"
-    }
-  ],
-  "cookies_loaded": true,
-  "guest_mode": false,
-  "debug": "LOGGED_IN | FindSection:HeaderHas | Scraped:DetailView | FinalURL:..."
+  "certificate_name": "AWS Certified Solutions Architect",
+  "credential_id": "ABC123XYZ",
+  "issuer": "Amazon Web Services",
+  "issue_date": "Jan 2024",
+  "expiry_date": "Jan 2027",
+  "verify_link": "https://...",
+  "source": "DetailView"
 }
 ```
-
-**Error Response:**
-```json
-{
-  "url": "https://www.linkedin.com/in/invalid",
-  "found": false,
-  "error": "Navigation failed: Timeout",
-  "certificates_list": "error",
-  "debug": "..."
-}
-```
-
-### 4. n8n Expression untuk Extract Data
-
-Setelah HTTP Request node, gunakan expressions:
-
-```javascript
-// Check if scraping succeeded
-{{ $json.found }}
-
-// Get total certificates
-{{ $json.total_certificates }}
-
-// Loop through certificates
-{{ $json.certificates_list }}
-
-// Get first certificate name
-{{ $json.certificates_list[0].certificate_name }}
-
-// Check if guest mode (limited access)
-{{ $json.guest_mode }}
-```
-
----
-
-## Struktur Modular
-
-### `scraper/models.py`
-**Pydantic schemas untuk validasi request dan response**
-
-- `LinkedInRequest`: Input payload
-- `CertificateItem`: Single certificate entity
-- `ScrapeResult`: Internal result structure
-
-### `scraper/config.py`
-**Konstanta dan konfigurasi global**
-
-- `COOKIES_FILE`: Path ke file cookies
-- `user_agents()`: Pool user agent untuk rotasi
-- `random_user_agent()`: Pick random UA
-
-### `scraper/browser.py`
-**Browser setup dan stealth configuration**
-
-- `launch_browser()`: Launch Chromium dengan flags anti-detection
-- `new_context()`: Create browser context dengan headers realistis
-- `apply_stealth()`: Inject script untuk patch fingerprints
-
-### `scraper/cookies_auth.py`
-**Cookie management dan auth detection**
-
-- `load_cookies()`: Load dan sanitize cookies dari file
-- `apply_cookies()`: Apply ke browser context
-- `check_login_status()`: Deteksi authwall/guest mode
-
-### `scraper/navigation.py`
-**Navigation helpers dan human behavior simulation**
-
-- `goto_with_retry()`: Navigate dengan retry logic
-- `human_behavior()`: Simulasi gerakan mouse dan scroll
-- `smooth_scroll_to()`: Scroll ke elemen tertentu
-- `stabilize_detail_view()`: Trigger lazy-loading dengan scroll incremental
-
-### `scraper/selectors.py`
-**Strategi menemukan section dan button**
-
-- `find_cert_section()`: Find "Licenses & Certifications" section dengan multiple fallbacks
-- `find_show_all_button()`: Find tombol "Show all" yang visible
-
-### `scraper/extraction.py`
-**Parse dan extract certificate data**
-
-- `extract_items()`: Extract certificates dari scope tertentu
-- Filter visible elements (avoid honeypots)
-- Normalisasi dates, issuer, verify links
-
-### `scraper/response.py`
-**Response builder untuk API contract**
-
-- `build_response()`: Compose success response
-- `build_error()`: Compose error response
-
-### `scraper/logging.py`
-**Debug utilities**
-
-- `add_debug()`: Append debug tag
-- `save_debug_files()`: Save screenshot + HTML ke `/tmp`
-
----
-
-## Keamanan & Best Practices
-
-### 🔒 Security Considerations
-
-#### 1. Cookie Protection
-- ✅ Cookies TIDAK pernah di-log ke console atau file
-- ✅ Restrict domain ke `.linkedin.com` only
-- ✅ Sanitize whitespace/newlines dari cookie values
-- ❌ JANGAN commit `cookies.json` ke Git (sudah di `.gitignore`)
-- ❌ JANGAN share cookies dengan pihak eksternal
-
-#### 2. Rate Limiting & Commercial Use
-LinkedIn membatasi jumlah profile view:
-- **Akun Gratis**: ~300-500 views/month
-- **Premium**: ~1000+ views/month
-- **Sales Navigator**: Unlimited commercial use
-
-**Rekomendasi:**
-- Gunakan akun Sales Navigator untuk production
-- Implement rate limiting di n8n workflow (delay antar request)
-- Monitor "Commercial Use Limit" warning
-
-#### 3. IP & Proxy Strategy
-- Gunakan **Residential Proxies** untuk scale (bukan Data Center IPs)
-- Rotate proxies per request via `proxy` field
-- Hindari scraping dari IP Telkom corporate langsung (bisa di-block)
-
-### 🛡️ Anti-Detection Best Practices
-
-#### 1. Avoid Honeypots
-- ✅ Module `extraction.py` filter elemen dengan `is_visible()`
-- ✅ Skip elemen dengan `display:none` atau `opacity:0`
-
-#### 2. Dynamic Class Names
-- ✅ Gunakan text-based selectors (`get_by_text`, `has_text`)
-- ✅ Gunakan aria-label, data attributes, role
-- ❌ JANGAN rely on generated class names (`.artdeco-btn__xyz123`)
-
-#### 3. Lazy Loading
-- ✅ `stabilize_detail_view()` scroll incremental (1/3, 2/3, bottom)
-- ✅ Wait for `networkidle` + element visibility
-- ❌ JANGAN instant scroll ke footer
-
-#### 4. Browser Fingerprinting
-- ✅ `apply_stealth()` patch `navigator.webdriver`
-- ✅ Mock plugins, languages, permissions
-- ✅ Random user agent per request
-
-#### 5. Human Behavior Simulation
-- ✅ Random mouse movements sebelum scroll
-- ✅ Random delays antar actions
-- ✅ Smooth scroll dengan animation
-
-### ⚖️ Legal & Compliance
-
-**PENTING**: Scraping LinkedIn melanggar Terms of Service mereka.
-
-- ✅ **Hanya gunakan untuk internal research** (bukan komersial)
-- ✅ **Data harus diamankan** (sesuai kebijakan rahasia perusahaan)
-- ✅ **Jangan re-publish** data ke public
-- ✅ **Respect rate limits** dan jangan overload server LinkedIn
-- ❌ **JANGAN jual data** hasil scraping
-
----
 
 ## Troubleshooting
 
-### ❌ Problem: "li_at cookie not found"
+### Chrome CDP not connecting
 
-**Cause**: File `cookies.json` tidak ada atau tidak mengandung cookie `li_at`
-
-**Solution**:
-1. Pastikan file `cookies.json` ada di folder `python_service/`
-2. Check format JSON valid
-3. Pastikan ada cookie dengan `name: "li_at"`
-4. Re-export cookies dari browser yang sudah login
-
-### ❌ Problem: "GUEST_MODE - Limited access"
-
-**Cause**: Cookies expired atau invalid
-
-**Solution**:
-1. Login ulang ke LinkedIn di browser
-2. Export cookies baru
-3. Replace `cookies.json` dengan cookies fresh
-4. Restart service
-
-### ❌ Problem: "Certificate section not found"
-
-**Cause**: 
-- Profile tidak punya section sertifikat
-- Selector berubah (LinkedIn update UI)
-- Page belum fully loaded
-
-**Solution**:
-1. Enable `debug: true` untuk lihat screenshots di `/tmp/`
-2. Check apakah profile memang punya certificates
-3. Increase `max_wait` jadi 30000-40000
-4. Try `detail_only: true` untuk langsung ke detail page
-
-### ❌ Problem: "Navigation failed: Timeout"
-
-**Cause**: Network slow atau LinkedIn down
-
-**Solution**:
-1. Check internet connection
-2. Try dengan proxy
-3. Increase `max_wait`
-4. Coba beberapa kali (retry logic)
-
-### ❌ Problem: Captcha atau Auth Wall
-
-**Cause**: Terlalu banyak request atau IP suspicious
-
-**Solution**:
-1. **Tunggu 24 jam** sebelum retry
-2. Gunakan residential proxy
-3. Reduce scraping frequency
-4. Check "Commercial Use Limit" di LinkedIn account
-
-### ❌ Problem: Hasil kosong padahal ada certificates
-
-**Cause**: Lazy loading belum triggered atau selector miss
-
-**Solution**:
-1. Set `detail_only: true` untuk force detail page
-2. Increase `max_wait` jadi 35000+
-3. Enable `debug: true` dan check HTML output
-4. Report selector issue (LinkedIn mungkin update UI)
-
----
-
-## Development & Testing
-
-### Run Tests (Future)
-
+**macOS / Linux:**
 ```bash
-# Unit tests
-pytest tests/test_selectors.py -v
-
-# Integration tests
-pytest tests/test_integration.py -v
+./stop
+pkill -f "Google Chrome"
+./run application
 ```
 
-### Debug Mode
-
-Enable debug untuk mendapatkan screenshots dan HTML:
-
-```json
-{
-  "url": "https://www.linkedin.com/in/username",
-  "debug": true
-}
+**Windows (PowerShell):**
+```powershell
+.\stop.ps1
+Get-Process chrome | Stop-Process -Force
+.\run.ps1 application
 ```
 
-Artifacts akan disimpan di `/tmp/`:
-- `/tmp/landing_[timestamp].png`
-- `/tmp/landing_[timestamp].html`
-- `/tmp/guest_mode_[timestamp].png` (jika guest)
-- `/tmp/no_results_[timestamp].png` (jika empty)
+### Port already in use
 
----
+**macOS / Linux:**
+```bash
+lsof -i :8787
+lsof -i :9222
+./stop
+./run application
+```
 
-## Roadmap & Future Improvements
+**Windows (PowerShell):**
+```powershell
+netstat -ano | findstr :8787
+netstat -ano | findstr :9222
+.\stop.ps1
+.\run.ps1 application
+```
 
-- [ ] Add fixtures untuk regression testing
-- [ ] Metrics & observability (Prometheus/Grafana)
-- [ ] Support multiple LinkedIn locales (EN, ID, etc)
-- [ ] Batch processing endpoint (multiple profiles)
-- [ ] Redis cache untuk hasil scraping
-- [ ] Webhook callback untuk async processing
-- [ ] Auto cookie refresh mechanism
+### LinkedIn blocking requests
 
----
+- Ensure you're logged in to LinkedIn in the CDP Chrome window
+- The scraper uses human-like behavior, but excessive scraping may trigger rate limits
+- Wait a few minutes between large batch operations
 
-## Support & Contact
+### Windows: PowerShell Execution Policy
 
-Untuk pertanyaan atau issue:
-1. Check troubleshooting section di atas
-2. Enable `debug: true` untuk diagnostics
-3. Review `/tmp/` screenshots
-4. Contact tim development Telkom
+If you get an error about scripts being disabled, run:
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
 
----
+## Limitations
+
+- Requires active LinkedIn login session
+- Subject to LinkedIn's terms of service
+- Rate limiting may apply for large-scale scraping
+- Some profiles may have restricted visibility
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
 ## License
 
-Internal use only - Telkom Indonesia  
-Confidential & Proprietary
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-**⚠️ DO NOT DISTRIBUTE OUTSIDE ORGANIZATION**
+## Disclaimer
+
+This tool is intended for personal use and educational purposes only. Users are responsible for ensuring their use of this tool complies with LinkedIn's Terms of Service and applicable laws. The author is not responsible for any misuse of this tool.
+
+## Author
+
+**Farhan Najib**
+
+- GitHub: [@yourusername](https://github.com/yourusername)
+- LinkedIn: [Your LinkedIn](https://www.linkedin.com/in/yourprofile/)
+
+---
+
+⭐ If you find this project useful, please consider giving it a star!
