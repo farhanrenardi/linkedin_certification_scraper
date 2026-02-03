@@ -283,7 +283,7 @@ This tool is intended for personal use and educational purposes only. Users are 
 
 ## Author
 
-**Farhan Najib**
+**farhanrenardi**
 
 - GitHub: [@yourusername](https://github.com/yourusername)
 - LinkedIn: [Your LinkedIn](https://www.linkedin.com/in/yourprofile/)
