@@ -285,8 +285,8 @@ This tool is intended for personal use and educational purposes only. Users are 
 
 **farhanrenardi**
 
-- GitHub: [@yourusername](https://github.com/yourusername)
-- LinkedIn: [Your LinkedIn](https://www.linkedin.com/in/yourprofile/)
+- GitHub: [@farhanrenardi](https://github.com/farhanrenardi)
+- LinkedIn: [Farhan Faiq Renardi](https://www.linkedin.com/in/farhanfaiq)
 
 ---
 
