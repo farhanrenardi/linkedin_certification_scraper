@@ -260,6 +260,39 @@ If LinkedIn blocks or requires login:
 
 ## Troubleshooting
 
+### Using the Diagnostic Tool
+
+A comprehensive diagnostic tool is provided to help troubleshoot scraping issues:
+
+```bash
+python3 diagnose.py <linkedin_profile_url> [output_dir]
+```
+
+**What it does:**
+1. Loads the LinkedIn profile page
+2. Saves screenshots and HTML for inspection
+3. Attempts to find the certificate section
+4. Tries to extract certificates
+5. Tests the details page accessibility
+6. Generates a detailed JSON report
+
+**Example:**
+```bash
+# Basic usage
+python3 diagnose.py "https://www.linkedin.com/in/username/"
+
+# With custom output directory
+python3 diagnose.py "https://www.linkedin.com/in/username/" ./debug_output
+```
+
+**Output files:**
+- `{profile}_main.png` - Screenshot of main profile page
+- `{profile}_main.html` - HTML source of main profile
+- `{profile}_details.png` - Screenshot of details page (if accessible)
+- `{profile}_diagnostic.json` - Complete diagnostic report
+
+Use this tool when a profile isn't scraping correctly to identify the issue.
+
 ### Issue: "No certificates found" but profile has certificates
 
 **Possible Causes:**
@@ -269,8 +302,9 @@ If LinkedIn blocks or requires login:
 
 **Solutions:**
 1. Use CDP mode with manual login in browser
-2. Check browser screenshot/HTML dump to see actual structure
-3. Increase `max_wait` parameter
+2. Run the diagnostic tool to inspect page structure
+3. Check screenshots to see what LinkedIn is actually showing
+4. Increase `max_wait` parameter
 
 ### Issue: "Connection refused" or "Cannot connect to CDP"
 

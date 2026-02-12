@@ -268,6 +268,35 @@ If you get an error about scripts being disabled, run:
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
+## Testing & Diagnostics
+
+### Test Script
+
+Test the scraper with multiple URLs at once:
+
+```bash
+python3 test_scraper_urls.py
+```
+
+This will test all three example URLs and generate a detailed report.
+
+### Diagnostic Tool
+
+When scraping doesn't work for a specific profile, use the diagnostic tool:
+
+```bash
+python3 diagnose.py "https://www.linkedin.com/in/username/"
+```
+
+This tool will:
+- Load and analyze the profile page
+- Save screenshots and HTML for inspection
+- Test certificate section detection
+- Attempt extraction and report results
+- Generate a detailed diagnostic report
+
+See [IMPROVEMENTS.md](IMPROVEMENTS.md) for more details on troubleshooting.
+
 ## Limitations
 
 - Requires active LinkedIn login session
