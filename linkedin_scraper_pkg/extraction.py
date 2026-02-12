@@ -47,7 +47,8 @@ async def extract_items(
                     items = potential_items
                     print(f"   🔥 [Extraction] Locked on selector: {sel} ({count} items)")
                     break
-        except: continue
+        except Exception:
+            continue
 
     if not items:
         print("   ⚠️ No candidate selectors matched. Falling back to all li/div in section.")
@@ -74,7 +75,7 @@ async def extract_items(
                         print(f"   🔍 Page text preview: {page_text[:300]}...")
                     else:
                         print("   ⚠️ No certification-related keywords found in page text")
-            except:
+            except Exception:
                 pass
             return results
         else:
@@ -111,7 +112,7 @@ async def extract_items(
                         cert_name = (await name_locator.first.text_content()).strip()
                         if cert_name and len(cert_name) > 2:
                             break
-                except:
+                except Exception:
                     continue
             
             if not cert_name and full_text:
@@ -155,7 +156,7 @@ async def extract_items(
                             # Clean up if issuer contains date patterns
                             if not re.search(r"\d{4}", issuer[:20]):  # Valid if no year in first 20 chars
                                 break
-                except:
+                except Exception:
                     continue
 
             # C. Issue Date (Cari span dengan date pattern)
@@ -174,7 +175,7 @@ async def extract_items(
                     if await date_locator.count() > 0:
                         texts = await date_locator.all_text_contents()
                         date_texts.extend(texts)
-                except:
+                except Exception:
                     continue
             
             # Also try full text for dates
@@ -221,7 +222,7 @@ async def extract_items(
                     if await id_locator.count() > 0:
                         texts = await id_locator.all_text_contents()
                         id_texts.extend(texts)
-                except:
+                except Exception:
                     continue
             
             # Also check full text
@@ -254,7 +255,7 @@ async def extract_items(
                             if verify_link.startswith("/"):
                                 verify_link = "https://www.linkedin.com" + verify_link
                             break
-                except:
+                except Exception:
                     continue
 
             # Clean up

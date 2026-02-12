@@ -24,7 +24,7 @@ async def find_cert_section(page: Page) -> Tuple[Locator | None, str]:
             # Fallback to ID element itself if no parent section
             return sec.first, "Classic_ID"
     except Exception as e:
-        print(f"   ⚠️ Classic ID strategy failed: {str(e)[:50]}")
+        print(f"   ⚠️ Classic ID strategy failed: {str(e)[:200]}")
 
     # 2. Strategy: Header Text (Regex) - Expanded patterns
     # Mencari H2/Span dengan teks "Licenses & certifications" (Tambah variasi bahasa)
@@ -56,7 +56,7 @@ async def find_cert_section(page: Page) -> Tuple[Locator | None, str]:
                 if await candidate_div.count() > 0:
                     return candidate_div.first, "Header_Div"
         except Exception as e:
-            print(f"   ⚠️ Header pattern {pattern[:20]} failed: {str(e)[:50]}")
+            print(f"   ⚠️ Header pattern {pattern[:20]} failed: {str(e)[:200]}")
             continue
 
     # 3. Strategy: Anchor Keyword Trace (SAVAGE MODE)
@@ -90,10 +90,10 @@ async def find_cert_section(page: Page) -> Tuple[Locator | None, str]:
                     card = anchor.locator("xpath=ancestor::div[contains(@class, 'artdeco-card') or contains(@class, 'pvs-list') or contains(@class, 'pvs-entity')][1]")
                     if await card.count() > 0:
                         return card.first, f"Anchor_Trace_Card_{pattern[:15]}"
-            except:
+            except Exception:
                 continue
     except Exception as e:
-        print(f"   ⚠️ Anchor trace strategy failed: {str(e)[:50]}")
+        print(f"   ⚠️ Anchor trace strategy failed: {str(e)[:200]}")
 
     # 4. Strategy: Contextual (Halaman Details)
     if "details/certifications" in page.url or "details/licenses" in page.url:

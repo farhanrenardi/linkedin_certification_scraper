@@ -20,6 +20,15 @@ from linkedin_scraper_pkg.response import build_response, build_error
 from linkedin_scraper_pkg.config import COOKIES_FILE, random_user_agent, USE_CDP, CDP_URL
 from linkedin_scraper_pkg.selectors import find_cert_section, find_show_all_button
 
+# --- CONSTANTS ---
+SCROLL_STEPS = 5
+SCROLL_DISTANCE = 800
+SCROLL_DELAY = 0.7
+SCROLL_PAUSE_SHORT = 0.5
+SCROLL_PAUSE_MEDIUM = 1.0
+SCROLL_PAUSE_LONG = 2.0
+SCROLL_FINAL_WAIT = 3.0
+
 # --- UTILS ---
 
 async def aggressive_scroll(page):
@@ -28,43 +37,48 @@ async def aggressive_scroll(page):
     
     # Scroll to top first to ensure we start from a known position
     await page.evaluate("window.scrollTo(0, 0)")
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(SCROLL_PAUSE_SHORT)
     
     # Scroll ke bawah bertahap dengan lebih banyak steps
-    for i in range(5):
-        await page.mouse.wheel(0, 800)
-        await asyncio.sleep(0.7)
+    for i in range(SCROLL_STEPS):
+        await page.mouse.wheel(0, SCROLL_DISTANCE)
+        await asyncio.sleep(SCROLL_DELAY)
     
     # Scroll ke paling bawah
     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    await asyncio.sleep(2)
+    await asyncio.sleep(SCROLL_PAUSE_LONG)
     
     # Scroll sedikit ke atas (trik ajaib untuk memicu elemen yang stuck)
     await page.mouse.wheel(0, -500)
-    await asyncio.sleep(1)
+    await asyncio.sleep(SCROLL_PAUSE_MEDIUM)
     
     # Balik ke bawah
     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    await asyncio.sleep(2)
+    await asyncio.sleep(SCROLL_PAUSE_LONG)
     
     # Extra scroll to middle to trigger any lazy content
     await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
-    await asyncio.sleep(1)
+    await asyncio.sleep(SCROLL_PAUSE_MEDIUM)
     
     # Back to bottom
     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    await asyncio.sleep(2)
+    await asyncio.sleep(SCROLL_PAUSE_LONG)
     
     print("   ✅ Scroll finished.")
-    await asyncio.sleep(3)  # Extra wait untuk render full DOM setelah scroll
+    await asyncio.sleep(SCROLL_FINAL_WAIT)  # Extra wait untuk render full DOM setelah scroll
 
 async def safe_close(page=None, browser=None, use_cdp=False):
+    """Safely close page and browser resources."""
     if page: 
-        try: await page.close()
-        except: pass
+        try:
+            await page.close()
+        except Exception as e:
+            print(f"   ⚠️ Error closing page: {str(e)[:100]}")
     if browser and not use_cdp: 
-        try: await browser.close()
-        except: pass
+        try:
+            await browser.close()
+        except Exception as e:
+            print(f"   ⚠️ Error closing browser: {str(e)[:100]}")
 
 async def scrape_attempt(page, data, is_guest):
     """
