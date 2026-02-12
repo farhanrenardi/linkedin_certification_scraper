@@ -25,24 +25,38 @@ from linkedin_scraper_pkg.selectors import find_cert_section, find_show_all_butt
 async def aggressive_scroll(page):
     """Scroll 'Shake' untuk memaksa Lazy Loading LinkedIn."""
     print("   📜 Aggressive Scroll initiated...")
-    # Scroll ke bawah bertahap
-    for _ in range(3):
-        await page.mouse.wheel(0, 1000)
-        await asyncio.sleep(0.5)
+    
+    # Scroll to top first to ensure we start from a known position
+    await page.evaluate("window.scrollTo(0, 0)")
+    await asyncio.sleep(0.5)
+    
+    # Scroll ke bawah bertahap dengan lebih banyak steps
+    for i in range(5):
+        await page.mouse.wheel(0, 800)
+        await asyncio.sleep(0.7)
     
     # Scroll ke paling bawah
     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    await asyncio.sleep(1)
+    await asyncio.sleep(2)
     
     # Scroll sedikit ke atas (trik ajaib untuk memicu elemen yang stuck)
     await page.mouse.wheel(0, -500)
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(1)
     
     # Balik ke bawah
     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(2)
+    
+    # Extra scroll to middle to trigger any lazy content
+    await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
+    await asyncio.sleep(1)
+    
+    # Back to bottom
+    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    await asyncio.sleep(2)
+    
     print("   ✅ Scroll finished.")
-    await asyncio.sleep(2)  # TAMBAH: Extra wait untuk render full DOM setelah scroll
+    await asyncio.sleep(3)  # Extra wait untuk render full DOM setelah scroll
 
 async def safe_close(page=None, browser=None, use_cdp=False):
     if page: 
@@ -78,11 +92,12 @@ async def scrape_attempt(page, data, is_guest):
         print("   ✅ Landed on Details Page.")
         items = await extract_items(page, "", "DetailView", root=page.locator("main"))
         extracted += items
-        if items: return extracted, is_guest, logs
+        if items: 
+            return extracted, is_guest, logs
+        else:
+            print("   ⚠️ Details page loaded but extraction returned 0. Trying harder...")
     else:
         print("   ⚠️ Redirect detected. Details page not accessible.")
-
-    print("   ⚠️ Details page loaded but extraction returned 0. Trying harder...")
 
     # STRATEGY 2: Fallback to Main Profile
     print(f"   🔄 STRATEGY 2: Fallback to Main Profile -> {base_url}")
