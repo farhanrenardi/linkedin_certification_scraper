@@ -8,6 +8,18 @@ A powerful web scraping tool that automatically extracts professional certificat
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
+## 🚀 Recent Improvements
+
+**Enhanced Robustness & Reliability** - The scraper has been significantly improved with:
+- **Multiple Extraction Strategies** - 12+ selectors for finding certificates across different LinkedIn layouts
+- **Improved Section Detection** - Multiple fallback strategies to locate certification sections
+- **Better Field Extraction** - 6 different strategies for certificate names, 5 for issuers, expanded date patterns
+- **Enhanced Scrolling** - More thorough lazy-loading trigger with optimized wait times
+- **Comprehensive Debug Output** - Detailed logging to troubleshoot extraction issues
+- **Better Error Handling** - Graceful fallbacks and informative error messages
+
+See [IMPROVEMENTS.md](IMPROVEMENTS.md) for detailed technical documentation.
+
 ## Features
 
 - **Cross-Platform** - Works on Windows, macOS, and Linux
