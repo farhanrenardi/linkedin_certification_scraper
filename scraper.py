@@ -1,1038 +1,186 @@
+# FILE: scraper.py
 #!/usr/bin/env python3
 """
-LinkedIn Certificate Scraper - CLI Standalone Version
-
-A command-line tool to scrape LinkedIn certification data from a user-provided profile URL.
-Supports both local Playwright-launched browsers and remote CDP (Chrome DevTools Protocol) connections.
-
-Usage:
-    python scraper.py <LINKEDIN_URL> [OPTIONS]
-
-Example:
-    python scraper.py https://www.linkedin.com/in/johndoe/ --debug
-    python scraper.py https://www.linkedin.com/in/johndoe/ --use-cdp --cdp-url http://localhost:9222
+LinkedIn Certificate Scraper - Savage & Adaptive Edition
 """
 
 import asyncio
 import sys
 import json
 import argparse
-import re
-from pathlib import Path
-from typing import Optional
+import traceback
+import random
 
 from linkedin_scraper_pkg.models import LinkedInRequest, CertificateItem
 from linkedin_scraper_pkg.browser import launch_browser, new_context, apply_stealth, connect_over_cdp
 from linkedin_scraper_pkg.cookies_auth import load_cookies, apply_cookies, check_login_status
-from linkedin_scraper_pkg.navigation import (
-    goto_with_retry,
-    human_behavior,
-    smooth_scroll_to,
-    stabilize_detail_view,
-    warm_up_scroll,
-    deep_scroll,
-    random_delay,
-)
-from linkedin_scraper_pkg.selectors import find_cert_section, find_show_all_button
+from linkedin_scraper_pkg.navigation import goto_with_retry, random_delay
 from linkedin_scraper_pkg.extraction import extract_items
 from linkedin_scraper_pkg.response import build_response, build_error
-from linkedin_scraper_pkg.config import COOKIES_FILE, random_user_agent, BLOCK_IMAGES, USE_CDP, CDP_URL
-from linkedin_scraper_pkg import scraper_logging
+from linkedin_scraper_pkg.config import COOKIES_FILE, random_user_agent, USE_CDP, CDP_URL
+from linkedin_scraper_pkg.selectors import find_cert_section, find_show_all_button
 
+# --- UTILS ---
+
+async def aggressive_scroll(page):
+    """Scroll 'Shake' untuk memaksa Lazy Loading LinkedIn."""
+    print("   📜 Aggressive Scroll initiated...")
+    # Scroll ke bawah bertahap
+    for _ in range(3):
+        await page.mouse.wheel(0, 1000)
+        await asyncio.sleep(0.5)
+    
+    # Scroll ke paling bawah
+    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    await asyncio.sleep(1)
+    
+    # Scroll sedikit ke atas (trik ajaib untuk memicu elemen yang stuck)
+    await page.mouse.wheel(0, -500)
+    await asyncio.sleep(0.5)
+    
+    # Balik ke bawah
+    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    await asyncio.sleep(1.5)
+    print("   ✅ Scroll finished.")
+    await asyncio.sleep(2)  # TAMBAH: Extra wait untuk render full DOM setelah scroll
+
+async def safe_close(page=None, browser=None, use_cdp=False):
+    if page: 
+        try: await page.close()
+        except: pass
+    if browser and not use_cdp: 
+        try: await browser.close()
+        except: pass
+
+async def scrape_attempt(page, data, is_guest):
+    """
+    Logika Scraping Adaptif: 
+    1. Coba Direct Link Detail (Paling bersih).
+    2. Jika gagal/redirect, Scan Profile Utama.
+    3. Jika ketemu tombol 'Show all', klik dan scan lagi.
+    """
+    extracted = []
+    logs = []
+
+    # 1. Bersihkan URL
+    base_url = data.url.split("?")[0].rstrip("/")
+
+    # STRATEGY 1: Direct to Details
+    details_url = f"{base_url}/details/certifications/"
+    print(f"   🔄 STRATEGY 1: Direct Attack -> {details_url}")
+    ok, err = await goto_with_retry(page, details_url, data.max_wait)
+    if not ok:
+        logs.append(f"GotoErr:{err[:30]}")
+    await aggressive_scroll(page)
+
+    # Check if really on details (no redirect)
+    if "details/certifications" in page.url:
+        print("   ✅ Landed on Details Page.")
+        items = await extract_items(page, "", "DetailView", root=page.locator("main"))
+        extracted += items
+        if items: return extracted, is_guest, logs
+    else:
+        print("   ⚠️ Redirect detected. Details page not accessible.")
+
+    print("   ⚠️ Details page loaded but extraction returned 0. Trying harder...")
+
+    # STRATEGY 2: Fallback to Main Profile
+    print(f"   🔄 STRATEGY 2: Fallback to Main Profile -> {base_url}")
+    await goto_with_retry(page, base_url, data.max_wait)
+    await aggressive_scroll(page)
+
+    section, method = await find_cert_section(page)
+    if section:
+        print(f"   ✅ Section Found via: {method}")
+        items = await extract_items(page, "", f"MainProfile_{method}", root=section)
+        extracted += items
+        if items: return extracted, is_guest, logs
+
+    # STRATEGY 3: Click "Show All" if exists
+    if data.click_show_all and section:
+        btn = await find_show_all_button(section)
+        if btn:
+            print("   🔄 Clicking 'Show All'...")
+            await btn.click()
+            await asyncio.sleep(2)  # Wait for load
+            await aggressive_scroll(page)
+            items = await extract_items(page, "", "ShowAllView")
+            extracted += items
+
+    return extracted, is_guest, logs
 
 async def scrape_linkedin(data: LinkedInRequest) -> dict:
-    """
-    Scrape LinkedIn certificates from the provided profile URL.
-    
-    Args:
-        data: LinkedInRequest object containing URL and scraping options
-        
-    Returns:
-        Dictionary containing scraped certificates and metadata
-    """
-    if not data.url or "linkedin.com" not in data.url:
-        return {"url": data.url, "found": False, "error": "Invalid URL"}
-
-    extracted_certs = []
-    debug_msg = []
-    cookies_loaded = False
-    debug_files = None
-
+    debug_msg = [f"Headless:{data.headless}", f"Proxy:{data.proxy}", f"UseCDP:{data.use_cdp}"]
     browser = None
     context = None
-    page = None
+    cookies_loaded = False
+    is_guest = True
 
-    def merge_cert_lists(primary: list[dict], secondary: list[dict]) -> list[dict]:
-        """Merge two certificate lists, deduplicating by certificate_name.
-
-        Prefer entries that have credential_id or verify_link.
-        """
-        combined = (primary or []) + (secondary or [])
-        dedup: dict[str, dict] = {}
-        for c in combined:
-            if not isinstance(c, dict):
-                continue
-            name = (c.get("certificate_name") or "").strip()
-            if not name:
-                continue
-            prev = dedup.get(name)
-            score = int(bool(c.get("credential_id"))) + int(bool(c.get("verify_link")))
-            prev_score = int(bool(prev and prev.get("credential_id"))) + int(bool(prev and prev.get("verify_link")))
-            if prev is None or score >= prev_score:
-                dedup[name] = c
-        return list(dedup.values())
-
-    async def extract_detail_items(label: str) -> list[dict]:
-        """Extract detail items from multiple roots to handle layout changes."""
-        from linkedin_scraper_pkg.extraction import extract_new_layout_items
-        
-        combined: list[dict] = []
-        
-        # First try the new SDUI layout extraction
-        try:
-            new_layout_items = await extract_new_layout_items(page, label)
-            if new_layout_items:
-                print(f"      [extract_detail_items] {len(new_layout_items)} items from new SDUI layout")
-                combined = merge_cert_lists(combined, [i.dict() for i in new_layout_items])
-        except Exception as e:
-            print(f"      [extract_detail_items] New layout extraction error: {e}")
-        
-        # Then try legacy selectors as fallback
-        roots = [
-            page.locator("main"),
-            page.locator("main ul"),
-            page.locator("main div[role='list']"),
-            page.locator(".scaffold-finite-scroll__content"),
-            page.locator(".pvs-list__outer-container"),
-        ]
-        selectors = [
-            "li, div[role='listitem'], div.pvs-list__item--one-column",
-            "li.pvs-list__paged-list-item",
-            "li.artdeco-list__item",
-            "div[data-view-name='profile-component-entity']",
-        ]
-        for root in roots:
-            for sel in selectors:
-                try:
-                    part = [
-                        i.dict()
-                        for i in await extract_items(
-                            page,
-                            sel,
-                            label,
-                            require_visible=False,
-                            root=root,
-                        )
-                    ]
-                    if part:
-                        print(f"      [extract_detail_items] {len(part)} items from root/sel combo")
-                    combined = merge_cert_lists(combined, part)
-                except Exception:
-                    continue
-        return combined
-
-    async def scroll_detail_until_stable(max_rounds: int = 12) -> None:
-        """Scroll likely containers until item count stops increasing."""
-        stable_rounds = 0
-        last_count = 0
-        
-        for rnd in range(max_rounds):
-            # Try to scroll main container
-            try:
-                await page.evaluate("document.querySelector('main')?.scrollBy(0, 1500)")
-            except Exception:
-                pass
-            
-            # Try to scroll body
-            try:
-                await page.evaluate("window.scrollBy(0, 1500)")
-            except Exception:
-                pass
-            
-            await page.wait_for_timeout(600)
-            
-            # Count items currently visible
-            current = 0
-            try:
-                current = await page.locator("main li, main [role='listitem'], div[role='listitem']").count()
-            except Exception:
-                pass
-            
-            print(f"      [scroll_detail] Round {rnd+1}: {current} items visible")
-            
-            if current == last_count:
-                stable_rounds += 1
-            else:
-                stable_rounds = 0
-            
-            last_count = current
-            
-            if stable_rounds >= 3:  # Wait for 3 stable rounds
-                print(f"      [scroll_detail] Stable after {rnd+1} rounds with {current} items")
-                break
-
-    async def expand_detail_list(max_clicks: int = 20) -> None:
-        """Click "Show more" / "Load more" buttons in detail pages to load additional items."""
-        consecutive_failures = 0
-        for i in range(max_clicks):
-            clicked = False
-            try:
-                # Try multiple button patterns - be very aggressive
-                patterns = [
-                    r"show\s+more|show\s+all|show\s+more\s+results|see\s+more|tampilkan\s+lebih",
-                    r"load\s+more|muat\s+lebih|muat\s+selengkapnya",
-                    r"view\s+more",
-                ]
-                for pattern in patterns:
-                    try:
-                        btns = page.get_by_role("button", name=re.compile(pattern, re.I))
-                        btn_count = await btns.count()
-                        if btn_count > 0:
-                            # Take the first visible button
-                            for j in range(btn_count):
-                                btn = btns.nth(j)
-                                try:
-                                    if await btn.is_visible():
-                                        await btn.scroll_into_view_if_needed()
-                                        await btn.click(timeout=8000)
-                                        print(f"      [expand_detail] Clicked button #{j} matching '{pattern}' (round {i+1})")
-                                        await page.wait_for_timeout(1500)
-                                        clicked = True
-                                        consecutive_failures = 0
-                                        break
-                                except:
-                                    continue
-                            if clicked:
-                                break
-                    except:
-                        continue
-                
-                if not clicked:
-                    # Also try finding by text content with more variations
-                    try:
-                        text_patterns = [
-                            "Load more", "Show more", "Show all", "View more",
-                            "Tampilkan lebih", "Muat lebih", "Lihat selengkapnya"
-                        ]
-                        for text_pat in text_patterns:
-                            load_more = page.locator(f"button:has-text('{text_pat}')")
-                            if await load_more.count() > 0:
-                                visible_count = 0
-                                for idx in range(await load_more.count()):
-                                    btn = load_more.nth(idx)
-                                    try:
-                                        if await btn.is_visible():
-                                            await btn.scroll_into_view_if_needed()
-                                            await btn.click(timeout=8000)
-                                            print(f"      [expand_detail] Clicked '{text_pat}' (round {i+1})")
-                                            await page.wait_for_timeout(1500)
-                                            clicked = True
-                                            consecutive_failures = 0
-                                            break
-                                    except:
-                                        continue
-                                if clicked:
-                                    break
-                    except:
-                        pass
-                
-                if not clicked:
-                    consecutive_failures += 1
-                    if consecutive_failures >= 2:
-                        print(f"      [expand_detail] No more buttons after {consecutive_failures} attempts, stopping")
-                        break
-            except Exception as e:
-                consecutive_failures += 1
-                print(f"      [expand_detail] Error: {e}")
-                if consecutive_failures >= 2:
-                    break
-
-
-    async def try_detail_fallback(tag: str) -> list[dict]:
-        """Navigate directly to details pages to capture full certificate list."""
-        results: list[dict] = []
-        try:
-            base_url = re.sub(r"[?#].*", "", data.url.rstrip("/"))
-            detail_urls = [
-                f"{base_url}/details/certifications/",
-                f"{base_url}/details/licenses/",
-            ]
-            for detail_url in detail_urls:
-                print(f"      → Trying: {detail_url}")
-                ok2, err2 = await goto_with_retry(page, detail_url, timeout_ms=max(20000, data.max_wait), tries=2)
-                if not ok2:
-                    print(f"      ✗ Navigation failed: {err2}")
-                    continue
-                
-                # Wait for page to settle
-                await page.wait_for_timeout(2500)
-                await human_behavior(page)
-                await stabilize_detail_view(page, data.max_wait)
-                
-                # Very aggressive scrolling to load all items
-                for scroll_round in range(6):
-                    await scroll_detail_until_stable(max_rounds=20)
-                    await expand_detail_list(max_clicks=15)
-                    await page.wait_for_timeout(800)
-                
-                # Final aggressive scroll
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(1200)
-                
-                for _ in range(10):
-                    await page.evaluate("document.querySelector('main')?.scrollBy(0, 2000)")
-                    await page.wait_for_timeout(400)
-                
-                try:
-                    await page.wait_for_selector(
-                        "main li, main [role='listitem'], div[role='listitem']",
-                        timeout=data.max_wait,
-                    )
-                except Exception:
-                    debug_msg.append(f"WaitDetailItemsTimeout:{tag}")
-                
-                # Count items found
-                try:
-                    item_count = await page.locator("main li, main [role='listitem'], div[role='listitem']").count()
-                    print(f"      ✓ Found {item_count} items on detail page")
-                    debug_msg.append(f"DetailPageItems:{item_count}")
-                except Exception:
-                    pass
-                
-                detail_certs = await extract_detail_items(tag)
-                print(f"      ✓ Extracted {len(detail_certs)} certificates")
-                if detail_certs:
-                    results = merge_cert_lists(results, detail_certs)
-        except Exception as e:
-            print(f"      ✗ Detail fallback error: {e}")
-            debug_msg.append(f"DetailFallbackErr:{str(e)[:30]}")
-        return results
-
-    # Decide whether to use CDP (real Chrome) or Playwright-launched Chromium
-    use_cdp = USE_CDP or getattr(data, "use_cdp", False)
-    cdp_url = getattr(data, "cdp_url", None) or CDP_URL
-
-    if use_cdp:
-        print(f"🚀 Connecting via CDP: {cdp_url}")
-        try:
-            browser = await connect_over_cdp(cdp_url)
-            context = browser.contexts[0] if browser.contexts else await browser.new_context()
-            debug_msg.append("CDP_MODE")
-        except Exception as e:
-            print(f"❌ CDP connection failed: {e}. Falling back to launch_browser")
-            use_cdp = False
-            debug_msg.append("CDP_FAIL_FALLBACK")
-    
-    if not use_cdp:
-        # Launch browser and context via modular helpers
-        browser = await launch_browser(headless=(data.headless if data.headless is not None else True), proxy=data.proxy)
-        context = await new_context(browser, locale="en-US", timezone_id="Asia/Jakarta", user_agent=random_user_agent())
+    if data.use_cdp:
+        print(f"🚀 Connecting via CDP: {data.cdp_url}")
+        browser = await connect_over_cdp(data.cdp_url or CDP_URL)
+        # PERBAIKAN: Hilangkan 'await' karena browser.contexts[0] bukan awaitable
+        context = browser.contexts[0] if browser.contexts else await browser.new_context()
+    else:
+        browser = await launch_browser(headless=data.headless or True, proxy=data.proxy)
+        context = await new_context(browser, user_agent=random_user_agent())
         await apply_stealth(context)
-
-        # Load and apply cookies only when we manage the context
         try:
             cookies = await load_cookies(COOKIES_FILE)
-            cookies_loaded, has_li_at = await apply_cookies(context, cookies)
-            if not has_li_at:
-                print("⚠️ WARNING: li_at cookie not found. Auth will likely fail.")
-        except Exception as e:
-            print(f"⚠️ Cookie load error: {e}")
-
-    async def _wire_blockers(p):
-        if BLOCK_IMAGES and not data.debug:
-            from playwright.async_api import Route
-            async def _block_images(route: Route):
-                await route.abort()
-            await p.route("**/*.{png,jpg,jpeg,gif,svg,ico}", _block_images)
-
-    async def _cleanup():
-        # Always close the tab; close whole browser only when we launched it
-        try:
-            if page:
-                await page.close()
-        except Exception:
-            pass
-        if browser:
-            try:
-                if not use_cdp:
-                    await browser.close()
-            except Exception:
-                pass
-
-    page = await context.new_page()
-    await _wire_blockers(page)
+            cookies_loaded, _ = await apply_cookies(context, cookies)
+        except: pass
 
     try:
-        print(f"🚀 Opening: {data.url}")
+        page = await context.new_page()
+        
+        # RETRY LOOP (Retry 2x max)
+        MAX_RETRIES = 2
+        for attempt in range(1, MAX_RETRIES + 1):
+            print(f"\n⚡ ATTEMPT {attempt}/{MAX_RETRIES}")
+            
+            if attempt == 1:
+                try:
+                    await page.goto("https://www.linkedin.com", timeout=15000)
+                    is_guest, _ = await check_login_status(page)
+                    if is_guest: print("⚠️ Warning: Guest Mode Detected (Login required for best results)")
+                except: pass
 
-        # Navigate dengan retry
-        ok, err = await goto_with_retry(page, data.url, timeout_ms=max(20000, data.max_wait), tries=2)
-        if not ok:
-            print(f"❌ Navigation failed: {err}")
-            return build_error(data, f"Navigation failed: {err}", debug_msg)
-        if data.debug:
-            await scraper_logging.save_debug_files(page, "landing")
-
-        # Wait a bit for page to stabilize
-        await page.wait_for_timeout(2000)
-
-        # Detect empty/blocked DOM early and fallback to CDP when available
-        dom_empty = False
-        try:
-            sec_count = await page.locator("section").count()
-            main_text = ""
-            try:
-                main_text = await page.locator("main").inner_text()
-            except Exception:
-                pass
-            if sec_count == 0 or len(main_text.strip()) < 20:
-                dom_empty = True
-                print(f"⚠️ DOM appears empty (sections: {sec_count}, main_text: {len(main_text)})")
-        except Exception:
-            pass
-
-        if dom_empty:
-            debug_msg.append("DOM_EMPTY_PRIMARY")
-            print("⚠️ DOM appears empty/blocked")
-            if not use_cdp and USE_CDP:
-                print("🔄 Retrying via CDP failover...")
-                await browser.close()
-                browser = await connect_over_cdp(cdp_url)
-                context = browser.contexts[0] if browser.contexts else await browser.new_context()
-                page = await context.new_page()
-                await _wire_blockers(page)
-                use_cdp = True
-                debug_msg.append("CDP_FAILOVER")
-                ok, err = await goto_with_retry(page, data.url, timeout_ms=max(20000, data.max_wait), tries=2)
-                if not ok:
-                    return build_error(data, f"Navigation failed after CDP failover: {err}", debug_msg)
-                if data.debug:
-                    await scraper_logging.save_debug_files(page, "landing_cdp")
+            certs, guest_stat, logs = await scrape_attempt(page, data, is_guest)
+            extracted_certs = certs
+            
+            if extracted_certs:
+                print(f"🎉 SUCCESS: Found {len(certs)} items.")
+                break
             else:
-                debug_msg.append("DOM_EMPTY_NO_FAILOVER")
-
-        # 2. Check Login Status
-        is_guest, login_debug = await check_login_status(page)
-        debug_msg.extend(login_debug)
-
-        if is_guest:
-            print("⚠️ GUEST MODE - Limited access")
-            debug_msg.append("GUEST_MODE")
-            if data.debug:
-                await scraper_logging.save_debug_files(page, "guest_mode")
-        else:
-            print("✓ Logged in successfully")
-            debug_msg.append("LOGGED_IN")
-
-        # Human behavior simulation + warm-up scroll to trigger lazy load
-        await human_behavior(page)
-        await warm_up_scroll(page)
-        # Additional deep scroll to force lazy-load sections
-        await deep_scroll(page)
-
-        # Direct detail-page handling to avoid missing items on /details pages
-        import re
-        is_detail_url = any(
-            k in page.url or k in data.url for k in [
-                "details/certifications",
-                "details/licenses",
-            ]
-        )
-        if is_detail_url:
-            try:
-                await stabilize_detail_view(page, data.max_wait)
-                try:
-                    await page.wait_for_selector(
-                        "main ul li",
-                        timeout=data.max_wait,
-                    )
-                except Exception:
-                    debug_msg.append("DetailDirect:WaitTimeout")
-
-                # Very aggressive scrolling
-                print("   🔄 Aggressive detail page scrolling...")
-                for scroll_round in range(8):
-                    print(f"   [DetailDirect Scroll {scroll_round+1}/8]")
-                    await scroll_detail_until_stable(max_rounds=20)
-                    await expand_detail_list(max_clicks=15)
-                    await page.wait_for_timeout(700)
-                
-                # Final bottom scroll
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(1200)
-                
-                for _ in range(10):
-                    await page.evaluate("document.querySelector('main')?.scrollBy(0, 2000)")
-                    await page.wait_for_timeout(400)
-
-                # Extract from all main > ul lists
-                extracted_certs = []
-                uls = page.locator("main ul")
-                try:
-                    ul_count = await uls.count()
-                    debug_msg.append(f"DetailULs:{ul_count}")
-                except Exception:
-                    ul_count = 0
-                for i_ul in range(ul_count):
-                    root_ul = uls.nth(i_ul)
-                    try:
-                        part = [
-                            i.dict()
-                            for i in await extract_items(
-                                page,
-                                "li",
-                                "DetailDirect",
-                                require_visible=False,
-                                root=root_ul,
-                            )
-                        ]
-                        if part:
-                            extracted_certs.extend(part)
-                    except Exception:
-                        continue
-
-                # Deduplicate by certificate_name
-                if extracted_certs:
-                    dedup = {}
-                    for c in extracted_certs:
-                        name = c.get("certificate_name") or ""
-                        if not name:
-                            continue
-                        # prefer entries with credential_id or verify_link
-                        prev = dedup.get(name)
-                        score = int(bool(c.get("credential_id"))) + int(bool(c.get("verify_link")))
-                        prev_score = int(bool(prev and prev.get("credential_id"))) + int(bool(prev and prev.get("verify_link")))
-                        if prev is None or score >= prev_score:
-                            dedup[name] = c
-                    extracted_certs = list(dedup.values())
-
-                debug_msg.append(f"DetailDirect:{len(extracted_certs)}")
-            except Exception as e:
-                debug_msg.append(f"DetailDirectErr:{str(e)[:30]}")
-
-            if data.debug and len(extracted_certs) == 0:
-                debug_files = await scraper_logging.save_debug_files(page, "detail_direct_empty")
-
-            debug_msg.append(f"FinalURL:{page.url}")
-            print(f"✅ Scraping complete (detail direct): {len(extracted_certs)} certificates found")
-            return build_response(
-                data,
-                [CertificateItem(**i) for i in extracted_certs],
-                cookies_loaded,
-                is_guest,
-                debug_msg,
-                debug_files,
-            )
-
-        # 3. FIND CERTIFICATE SECTION - Multiple strategies
-        print("🔍 Searching for certificates section...")
-
-        section = None
-        section_found = False
-
-        # If detail_only requested, jump straight to detail pages
-        if not is_guest and data.detail_only:
-            base_url = re.sub(r"[?#].*", "", data.url.rstrip("/"))
-            for detail_url in [f"{base_url}/details/certifications/", f"{base_url}/details/licenses/"]:
-                try:
-                    await page.goto(detail_url, timeout=max(20000, data.max_wait), wait_until="networkidle")
-                    await random_delay(2, 4)
-                    debug_msg.append("Jump:DetailOnly")
-                    break
-                except Exception:
-                    continue
-
-        section, strat = await find_cert_section(page)
-        if section:
-            section_found = True
-            debug_msg.append(f"FindSection:{strat}")
-        else:
-            try:
-                section_count = await page.locator("section").count()
-                print(f"   Sections available before retry: {section_count}")
-                debug_msg.append(f"SectionCount:{section_count}")
-            except Exception:
-                pass
-
-        # Early error-page detection (e.g., "Something went wrong")
-        try:
-            err_locator = page.get_by_text("Something went wrong", exact=False)
-            if await err_locator.count() > 0:
-                debug_msg.append("ErrorPage:SomethingWentWrong")
-                if data.debug:
-                    await scraper_logging.save_debug_files(page, "error_page")
-                await browser.close()
-                return build_error(data, "LinkedIn returned an error page (possible block/authwall)", debug_msg)
-        except Exception:
-            pass
-
-        if section_found and section:
-            print("✅ Certificate section located!")
-
-            # Scroll ke section
-            await smooth_scroll_to(page, section)
-
-            scraped_details = False
-
-            # Try to scrape from section FIRST before clicking show-all
-            print("   Scraping from main section...")
-            try:
-                extracted_certs = [
-                    i.dict() for i in await extract_items(page, "li, div[data-view-name='profile-component-entity']", "MainView", root=section, require_visible=False)
-                ]
-                print(f"   Got {len(extracted_certs)} certificates from MainView")
-                debug_msg.append(f"Scraped:MainView:{len(extracted_certs)}")
-                
-                # If nothing, try broader selector
-                if not extracted_certs:
-                    print("   MainView empty, trying MainViewWide...")
-                    extracted_certs = [
-                        i.dict() for i in await extract_items(page, "li, div", "MainViewWide", root=section, require_visible=False)
-                    ]
-                    print(f"   Got {len(extracted_certs)} certificates from MainViewWide")
-                    debug_msg.append(f"Scraped:MainViewWide:{len(extracted_certs)}")
-            except Exception as e:
-                print(f"   ⚠️ MainView extraction failed: {e}")
-                debug_msg.append(f"MainViewError:{str(e)[:30]}")
-
-            # Check if there's a "Show all" button indicating more certificates exist
-            has_show_all_btn = False
-            if not is_guest:
-                try:
-                    show_all_btn = await find_show_all_button(section)
-                    has_show_all_btn = show_all_btn and await show_all_btn.count() > 0
-                except Exception:
-                    has_show_all_btn = False
-
-            # ALWAYS try to get full list from details page when logged in
-            # Main view typically only shows 3-4 certificates
-            if not is_guest:
-                print("   🔄 Navigating to details page for full certificate list...")
-                
-                # First try: click show-all button if found
-                show_all_btn = await find_show_all_button(section)
-                clicked_show_all = False
-
-                if show_all_btn and await show_all_btn.count() > 0:
-                    print(f"   ℹ️ Found 'Show all' button, clicking...")
-                    try:
-                        current_url = page.url
-                        href_backup = await show_all_btn.get_attribute("href")
-                        await show_all_btn.scroll_into_view_if_needed()
-                        try:
-                            await show_all_btn.click(timeout=min(12000, data.max_wait))
-                            clicked_show_all = True
-                        except Exception:
-                            if href_backup:
-                                await page.goto(
-                                    f"https://www.linkedin.com{href_backup}",
-                                    timeout=max(15000, data.max_wait // 2),
-                                )
-                                clicked_show_all = True
-                        
-                        if clicked_show_all:
-                            # Use domcontentloaded instead of networkidle to avoid timeout on infinite scroll
-                            try:
-                                await page.wait_for_load_state("domcontentloaded", timeout=max(10000, data.max_wait // 2))
-                            except Exception:
-                                print(f"⚠️ Page load timeout, continuing anyway...")
-                                debug_msg.append("PageLoadTimeout")
-                            
-                            await page.wait_for_timeout(1500)  # Brief pause for rendering
-
-                            # Check if redirected to external domain (e.g., Credly)
-                            if "linkedin.com" not in page.url:
-                                print(f"   🚫 External redirect detected: {page.url[:80]}")
-                                debug_msg.append("ExternalRedirect")
-                                # Go back to LinkedIn profile
-                                await page.goto(current_url, timeout=max(15000, data.max_wait))
-                                await page.wait_for_timeout(1500)
-                                clicked_show_all = False
-                    except Exception as e:
-                        print(f"   ⚠️ Show all click failed: {e}")
-                        debug_msg.append(f"ShowAllError: {str(e)[:30]}")
-                        clicked_show_all = False
-                
-                # Second try: direct navigation to details page if button click didn't work
-                if not clicked_show_all or "details/" not in page.url:
-                    print("   ↪️ Directly navigating to details page...")
-                    detail_certs = await try_detail_fallback("DetailDirect")
-                    if detail_certs:
-                        extracted_certs = merge_cert_lists(extracted_certs, detail_certs)
-                        scraped_details = True
-                        debug_msg.append(f"Scraped:DetailDirect:{len(detail_certs)}")
-                
-                # If we're on details page (from button click), extract
-                if "details/certifications" in page.url or "details/licenses" in page.url:
-                    if not scraped_details:
-                        print("   ✓ Details page loaded, scrolling to load all items...")
-                        await page.wait_for_timeout(2000)  # Wait for initial render
-                        await human_behavior(page)
-                        await stabilize_detail_view(page, data.max_wait)
-                        
-                        # Multiple rounds of aggressive scrolling and expanding
-                        for scroll_round in range(5):
-                            print(f"   [Scroll Round {scroll_round+1}/5] Scrolling and expanding...")
-                            await scroll_detail_until_stable(max_rounds=20)
-                            await expand_detail_list(max_clicks=15)
-                            await page.wait_for_timeout(800)
-                        
-                        # Final scroll to bottom
-                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        await page.wait_for_timeout(1500)
-                        
-                        # Extra scroll to ensure everything is loaded
-                        for _ in range(8):
-                            await page.evaluate("document.querySelector('main')?.scrollBy(0, 2000)")
-                            await page.wait_for_timeout(500)
-                        
-                        try:
-                            await page.wait_for_selector(
-                                "main li, main [role='listitem'], div[role='listitem']",
-                                timeout=data.max_wait,
-                            )
-                        except Exception:
-                            debug_msg.append("WaitDetailItemsTimeout")
-                        try:
-                            item_count = await page.locator("main li, main [role='listitem'], div[role='listitem']").count()
-                            print(f"   Detail items detected: {item_count}")
-                            debug_msg.append(f"DetailItems:{item_count}")
-                        except Exception:
-                            pass
-                        detail_certs = await extract_detail_items("DetailView")
-                        print(f"   Extracted {len(detail_certs)} certificates from detail page")
-                        extracted_certs = merge_cert_lists(extracted_certs, detail_certs)
-                        scraped_details = True
-                        debug_msg.append("Scraped:DetailView")
-                        if data.debug and not extracted_certs:
-                            await scraper_logging.save_debug_files(page, "detail_empty")
-
-            # Fallback: Scrape from main view (if not already scraped and show-all didn't work)
-            if not scraped_details and not extracted_certs:
-                print("   Scraping from main section (fallback)...")
-                if section:
-                    extracted_certs = [
-                        i.dict() for i in await extract_items(page, "li, div[data-view-name='profile-component-entity']", "MainViewFallback", root=section, require_visible=False)
-                    ]
-                    debug_msg.append(f"Scraped:MainViewFallback:{len(extracted_certs)}")
-                    if not extracted_certs:
-                        extracted_certs = [
-                            i.dict() for i in await extract_items(page, "li, div", "MainViewWideFallback", root=section, require_visible=False)
-                        ]
-                        debug_msg.append(f"Scraped:MainViewWideFallback:{len(extracted_certs)}")
-                else:
-                    print("   ⚠️ No section found to scrape from")
-                    debug_msg.append("NoSectionToScrape")
-        else:
-            print("❌ Certificate section not found!")
-            debug_msg.append("SECTION_NOT_FOUND")
-
-            # Retry after a deeper scroll in case the section was loaded late
-            await deep_scroll(page, steps=8)
-            section_retry, strat_retry = await find_cert_section(page)
-            if section_retry:
-                section = section_retry
-                section_found = True
-                debug_msg.append(f"RetryFindSection:{strat_retry}")
-                print("✅ Certificate section found after retry!")
-                await smooth_scroll_to(page, section)
-                scraped_details = False
-
-                if not is_guest:
-                    show_all_btn = await find_show_all_button(section)
-
-                    if show_all_btn and await show_all_btn.count() > 0:
-                        print("🔥 Attempting to expand details (retry)...")
-                        try:
-                            href_backup = await show_all_btn.get_attribute("href")
-                            await show_all_btn.scroll_into_view_if_needed()
-                            try:
-                                await show_all_btn.click(timeout=min(8000, data.max_wait))
-                            except Exception:
-                                if href_backup:
-                                    await page.goto(
-                                        f"https://www.linkedin.com{href_backup}",
-                                        timeout=max(12000, data.max_wait // 2),
-                                    )
-                            # Use domcontentloaded instead of networkidle
-                            try:
-                                await page.wait_for_load_state("domcontentloaded", timeout=max(8000, data.max_wait // 3))
-                            except Exception:
-                                print(f"⚠️ Page load timeout (retry), continuing anyway...")
-                                debug_msg.append("PageLoadTimeoutRetry")
-                            
-                            await page.wait_for_timeout(1500)
-
-                            if "details/certifications" in page.url or "details/licenses" in page.url:
-                                print("   ✓ Details page loaded (retry)")
-                                await human_behavior(page)
-                                await stabilize_detail_view(page, data.max_wait)
-                                await expand_detail_list()
-                                await scroll_detail_until_stable()
-                                detail_certs = await extract_detail_items("DetailView")
-                                extracted_certs = merge_cert_lists(extracted_certs, detail_certs)
-                                scraped_details = True
-                                debug_msg.append("Scraped:DetailViewRetry")
-                                if data.debug and not extracted_certs:
-                                    await scraper_logging.save_debug_files(page, "detail_empty_retry")
-                            else:
-                                if "details/" in page.url:
-                                    await human_behavior(page)
-                                    await stabilize_detail_view(page, data.max_wait)
-                                    await expand_detail_list()
-                                    await scroll_detail_until_stable()
-                                    detail_certs = await extract_detail_items("DetailView")
-                                    extracted_certs = merge_cert_lists(extracted_certs, detail_certs)
-                                    scraped_details = True
-                                    debug_msg.append("Scraped:DetailViewRetry-NoClick")
-                        except Exception as e:
-                            print(f"   ⚠️ Show all click failed (retry): {e}")
-                            debug_msg.append(f"ShowAllErrorRetry:{str(e)[:30]}")
-
-                if not scraped_details:
-                    print("   Scraping from main section (retry)...")
-                    if section:
-                        extracted_certs = [
-                            i.dict() for i in await extract_items(page, "li, div[data-view-name='profile-component-entity']", "MainViewRetry", root=section, require_visible=False)
-                        ]
-                        debug_msg.append(f"Scraped:MainViewRetry:{len(extracted_certs)}")
-                        if not extracted_certs:
-                            extracted_certs = [
-                                i.dict() for i in await extract_items(page, "li, div", "MainViewRetryWide", root=section, require_visible=False)
-                            ]
-                            debug_msg.append(f"Scraped:MainViewRetryWide:{len(extracted_certs)}")
-
-            # If still not found, continue with detail fallback below
-
-            # Fallback: force navigate to details/certifications when logged in
-            if not is_guest:
-                try:
-                    base_url = re.sub(r"[?#].*", "", data.url.rstrip("/"))
-                    detail_urls = [
-                        f"{base_url}/details/certifications/",
-                        f"{base_url}/details/licenses/"
-                    ]
-                    for detail_url in detail_urls:
-                        print(f"🔄 Trying fallback URL: {detail_url}")
-                        try:
-                            ok2, err2 = await goto_with_retry(page, detail_url, timeout_ms=max(20000, data.max_wait), tries=1)
-                            if not ok2:
-                                continue
-                            await human_behavior(page)
-                            await stabilize_detail_view(page, data.max_wait)
-                            await expand_detail_list()
-                            await scroll_detail_until_stable()
-                            try:
-                                await page.wait_for_selector(
-                                    "main li, main [role='listitem'], div[role='listitem']",
-                                    timeout=data.max_wait,
-                                )
-                            except Exception:
-                                debug_msg.append("WaitDetailItemsTimeoutFB")
-                            try:
-                                item_count_fb = await page.locator("main li, main [role='listitem'], div[role='listitem']").count()
-                                print(f"   Detail items detected (fallback): {item_count_fb}")
-                                debug_msg.append(f"DetailItemsFB:{item_count_fb}")
-                            except Exception:
-                                pass
-                            extracted_certs = [
-                                i.dict()
-                                for i in await extract_items(
-                                    page, "main, div[role='main']", "DetailFallback", require_visible=False
-                                )
-                            ]
-                            if extracted_certs:
-                                debug_msg.append("Fallback:DetailPage")
-                                section_found = True
-                                break
-                        except Exception as fe:
-                            debug_msg.append(f"FallbackErr:{str(fe)[:30]}")
-                except Exception as fe:
-                    debug_msg.append(f"FallbackBuildErr:{str(fe)[:30]}")
-
-            # Debug: List all sections
-            try:
-                all_sec = page.locator("section")
-                count = await all_sec.count()
-                debug_msg.append(f"TotalSections: {count}")
-
-                # Capture preview of section headings for debugging
-                previews = []
-                for i in range(min(count, 10)):
-                    sec = all_sec.nth(i)
-                    try:
-                        heading = await sec.locator("h2, h3, header, span").first.inner_text()
-                    except Exception:
-                        heading = ""
-                    try:
-                        snippet = await sec.inner_text()
-                    except Exception:
-                        snippet = ""
-                    text = (heading or snippet).strip().replace("\n", " ")
-                    if text:
-                        previews.append(text[:80])
-                if previews:
-                    debug_msg.append("SectionPreview:" + " || ".join(previews))
-            except Exception:
-                pass
-
-        debug_msg.append(f"FinalURL:{page.url}")
-
-        # If only fallback items with no meaningful fields were gathered, treat as not found
-        def _is_empty_fallback(item: dict) -> bool:
-            return (
-                "fallback" in item.get("source", "").lower()
-                and not item.get("issuer")
-                and not item.get("issue_date")
-                and not item.get("expiry_date")
-                and not item.get("credential_id")
-                and not item.get("verify_link")
-            )
-
-        if extracted_certs and all(_is_empty_fallback(i) for i in extracted_certs):
-            extracted_certs = []
-
-        if extracted_certs:
-            extracted_certs = merge_cert_lists(extracted_certs, [])
-
-        if data.debug and len(extracted_certs) == 0:
-            debug_files = await scraper_logging.save_debug_files(page, "no_results")
-
-        print(f"✅ Scraping complete: {len(extracted_certs)} certificates found")
-        return build_response(
-            data,
-            [CertificateItem(**i) for i in extracted_certs],
-            cookies_loaded,
-            is_guest,
-            debug_msg,
-            debug_files,
-        )
+                print("⚠️ No items found. Retrying with fresh reload...")
+                await asyncio.sleep(2)
+        
+        return build_response(data, [CertificateItem(**i) for i in extracted_certs], cookies_loaded, is_guest, debug_msg)
 
     except Exception as e:
-        print(f"❌ Fatal error: {e}")
+        print(f"❌ Fatal Error: {e}")
+        traceback.print_exc()
         return build_error(data, str(e), debug_msg)
-
     finally:
-        await _cleanup()
-
+        await safe_close(page, browser, data.use_cdp)
 
 def main():
-    """Main CLI entry point."""
-    parser = argparse.ArgumentParser(
-        description="LinkedIn Certificate Scraper - Scrape certificates from LinkedIn profiles",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s https://www.linkedin.com/in/johndoe/
-  %(prog)s https://www.linkedin.com/in/johndoe/ --debug
-  %(prog)s https://www.linkedin.com/in/johndoe/ --use-cdp --cdp-url http://localhost:9222
-  %(prog)s https://www.linkedin.com/in/johndoe/ --headless false --max-wait 30000
-        """
-    )
-    
-    parser.add_argument(
-        "url",
-        help="LinkedIn profile URL to scrape (e.g., https://www.linkedin.com/in/username/)"
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug mode to save screenshots and detailed logs"
-    )
-    parser.add_argument(
-        "--headless",
-        type=lambda x: x.lower() in ("true", "1", "yes"),
-        default=True,
-        help="Run browser in headless mode (default: true)"
-    )
-    parser.add_argument(
-        "--max-wait",
-        type=int,
-        default=25000,
-        help="Maximum wait time in milliseconds for page loads (default: 25000)"
-    )
-    parser.add_argument(
-        "--use-cdp",
-        action="store_true",
-        help="Use Chrome DevTools Protocol (CDP) for remote browser connection"
-    )
-    parser.add_argument(
-        "--cdp-url",
-        default="http://127.0.0.1:9222",
-        help="CDP endpoint URL (default: http://127.0.0.1:9222)"
-    )
-    parser.add_argument(
-        "--detail-only",
-        action="store_true",
-        help="Only scrape from detail pages (/details/certifications/)"
-    )
-    parser.add_argument(
-        "--proxy",
-        help="Proxy URL to use for requests (e.g., http://proxy.example.com:8080)"
-    )
-    parser.add_argument(
-        "--output",
-        "-o",
-        help="Output file path (JSON format). If not specified, prints to stdout"
-    )
-    parser.add_argument(
-        "--cookies",
-        help="Path to cookies.json file. If not specified, uses default location"
-    )
-    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("url")
+    parser.add_argument("--output", "-o")
+    parser.add_argument("--cookies")
     args = parser.parse_args()
     
-    # Validate URL
-    if not args.url.startswith("http"):
-        args.url = f"https://{args.url}"
-    
-    if "linkedin.com" not in args.url:
-        print(f"❌ Error: URL must be a LinkedIn profile URL")
-        sys.exit(1)
-    
-    # Override cookies path if provided
     if args.cookies:
-        import linkedin_scraper_pkg.config as config
-        config.COOKIES_FILE = args.cookies
-    
-    # Create request object
-    request_data = LinkedInRequest(
-        url=args.url,
-        debug=args.debug,
-        headless=args.headless,
-        max_wait=args.max_wait,
-        use_cdp=args.use_cdp,
-        cdp_url=args.cdp_url,
-        detail_only=args.detail_only,
-        proxy=args.proxy,
-    )
-    
-    # Run scraper
-    try:
-        result = asyncio.run(scrape_linkedin(request_data))
+        import linkedin_scraper_pkg.config as c
+        c.COOKIES_FILE = args.cookies
         
-        # Output result
-        if args.output:
-            with open(args.output, "w") as f:
-                json.dump(result, f, indent=2)
-            print(f"\n📁 Results saved to: {args.output}")
-        else:
-            print("\n📊 Scraping Results:")
-            print(json.dumps(result, indent=2))
-        
-        # Exit with appropriate code
-        if result.get("found", False) or result.get("certificates"):
-            sys.exit(0)
-        else:
-            sys.exit(1)
-            
-    except KeyboardInterrupt:
-        print("\n⚠️ Interrupted by user")
-        sys.exit(130)
-    except Exception as e:
-        print(f"❌ Fatal error: {e}")
-        sys.exit(1)
-
+    req = LinkedInRequest(url=args.url, use_cdp=True, cdp_url=CDP_URL, debug=True)
+    res = asyncio.run(scrape_linkedin(req))
+    
+    print(json.dumps(res, indent=2))
+    if args.output:
+        with open(args.output, "w") as f: json.dump(res, f, indent=2)
 
 if __name__ == "__main__":
     main()
