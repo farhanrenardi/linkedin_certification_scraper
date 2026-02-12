@@ -34,6 +34,25 @@ async def goto_with_retry(page: Page, url: str, timeout_ms: int, tries: int = 2)
     return False, last_err
 
 
+async def navigate_via_js(page: Page, url: str, timeout_ms: int = 20000) -> Tuple[bool, str]:
+    """Navigate via window.location.href to bypass SDUI client-side interception.
+
+    LinkedIn's new SDUI routing layer intercepts Playwright's page.goto()
+    and redirects automated browsers away from profile pages. Using raw
+    JavaScript navigation bypasses this detection layer.
+
+    Returns (success, error_message).
+    """
+    try:
+        await page.evaluate(f"window.location.href = '{url}'")
+        await page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+        await page.wait_for_timeout(3000)
+        await random_delay(0.5, 1.5)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
 async def human_behavior(page: Page) -> None:
     """Perform gentle mouse moves and incremental scrolls to emulate humans.
 

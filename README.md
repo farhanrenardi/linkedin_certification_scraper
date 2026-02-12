@@ -14,9 +14,11 @@ A powerful web scraping tool that automatically extracts professional certificat
 - **Web UI Interface** - Clean, intuitive browser-based interface
 - **Batch Processing** - Upload CSV/Excel files with multiple LinkedIn URLs
 - **Single URL Scraping** - Quick scraping of individual profiles
-- **CDP Integration** - Uses Chrome DevTools Protocol for reliable browser automation
+- **Persistent Session** - Uses persistent browser context to maintain login state across runs
+- **CDP Integration** - Optional Chrome DevTools Protocol support for advanced use
+- **SDUI Extraction** - Handles LinkedIn's new SDUI (Server-Driven UI) layout
 - **Human-like Behavior** - Implements realistic scrolling and delays to avoid detection
-- **Stealth Mode** - Bypasses bot detection using playwright-stealth
+- **Stealth Mode** - Bypasses bot detection with anti-automation techniques
 - **Export to CSV** - Download results in CSV format for further analysis
 
 ## Demo
@@ -108,13 +110,29 @@ This command will:
 
 ### Scraping Workflow
 
-1. **Open LinkedIn** - Click "Open LinkedIn in Chrome" to open LinkedIn in the CDP browser
-2. **Login** - Log in to your LinkedIn account in the Chrome window
-3. **Enter URLs** - Either:
-   - Upload a CSV/Excel file containing LinkedIn profile URLs
-   - Enter a single LinkedIn profile URL directly
-4. **Start Scraping** - Click "Start Scraping" and wait for results
-5. **Download** - View results in the table and download as CSV
+1. **Initial Login** - Run `save_cookies.py` once to log in to LinkedIn:
+   ```bash
+   python save_cookies.py
+   ```
+   A Chrome window will open. Log in to your LinkedIn account. The session will be saved to `browser_data/` automatically.
+2. **Enter URLs** - Either:
+   - Use the Web UI to upload a CSV/Excel file or enter URLs
+   - Use the CLI: `python scraper.py "https://www.linkedin.com/in/username/"`
+3. **Start Scraping** - Results are returned as JSON with certificate details
+4. **Download** - View results in the web UI table and download as CSV
+
+### CLI Usage
+
+```bash
+# Scrape a single profile
+python scraper.py "https://www.linkedin.com/in/username/"
+
+# The scraper will:
+# 1. Use persistent session from browser_data/
+# 2. Navigate to the profile
+# 3. Extract all certificates with names, issuers, dates, and credential IDs
+# 4. Output results as JSON
+```
 
 ### Stopping the Application
 
@@ -134,10 +152,10 @@ This command will:
 linkedin_certification_scraper/
 ├── linkedin_scraper_pkg/       # Core scraping modules
 │   ├── __init__.py
-│   ├── browser.py              # Browser launch & CDP connection
+│   ├── browser.py              # Browser launch & persistent context
 │   ├── config.py               # Configuration settings
 │   ├── cookies_auth.py         # Cookie-based authentication
-│   ├── extraction.py           # Certificate data extraction
+│   ├── extraction.py           # Certificate data extraction (SDUI + legacy)
 │   ├── models.py               # Pydantic data models
 │   ├── navigation.py           # Page navigation & scrolling
 │   ├── response.py             # Response formatting
@@ -146,6 +164,7 @@ linkedin_certification_scraper/
 ├── ui_app.py                   # FastAPI web UI application
 ├── run_ui.py                   # Application launcher with CDP
 ├── scraper.py                  # CLI interface
+├── save_cookies.py             # Login helper (run once for initial setup)
 ├── install                     # Installation script (macOS/Linux)
 ├── install.ps1                 # Installation script (Windows)
 ├── run                         # Start script (macOS/Linux)

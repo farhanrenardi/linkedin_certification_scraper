@@ -33,6 +33,7 @@ async def load_cookies(path: str = COOKIES_FILE) -> List[dict]:
             domain = "." + domain
         if "linkedin.com" not in domain:
             continue
+
         c["domain"] = domain
 
         if "sameSite" in c:

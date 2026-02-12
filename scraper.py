@@ -22,10 +22,11 @@ from pathlib import Path
 from typing import Optional
 
 from linkedin_scraper_pkg.models import LinkedInRequest, CertificateItem
-from linkedin_scraper_pkg.browser import launch_browser, new_context, apply_stealth, connect_over_cdp
+from linkedin_scraper_pkg.browser import launch_browser, new_context, apply_stealth, connect_over_cdp, launch_persistent_context
 from linkedin_scraper_pkg.cookies_auth import load_cookies, apply_cookies, check_login_status
 from linkedin_scraper_pkg.navigation import (
     goto_with_retry,
+    navigate_via_js,
     human_behavior,
     smooth_scroll_to,
     stabilize_detail_view,
@@ -34,7 +35,7 @@ from linkedin_scraper_pkg.navigation import (
     random_delay,
 )
 from linkedin_scraper_pkg.selectors import find_cert_section, find_show_all_button
-from linkedin_scraper_pkg.extraction import extract_items
+from linkedin_scraper_pkg.extraction import extract_items, extract_new_layout_items
 from linkedin_scraper_pkg.response import build_response, build_error
 from linkedin_scraper_pkg.config import COOKIES_FILE, random_user_agent, BLOCK_IMAGES, USE_CDP, CDP_URL
 from linkedin_scraper_pkg import scraper_logging
@@ -84,20 +85,20 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
 
     async def extract_detail_items(label: str) -> list[dict]:
         """Extract detail items from multiple roots to handle layout changes."""
-        from linkedin_scraper_pkg.extraction import extract_new_layout_items
-        
         combined: list[dict] = []
         
-        # First try the new SDUI layout extraction
+        # First try the new SDUI layout extraction (most reliable)
         try:
             new_layout_items = await extract_new_layout_items(page, label)
             if new_layout_items:
-                print(f"      [extract_detail_items] {len(new_layout_items)} items from new SDUI layout")
-                combined = merge_cert_lists(combined, [i.dict() for i in new_layout_items])
+                print(f"      [extract_detail_items] {len(new_layout_items)} items from SDUI layout")
+                combined = [i.dict() for i in new_layout_items]
+                # SDUI extraction is authoritative; skip legacy fallbacks
+                return combined
         except Exception as e:
-            print(f"      [extract_detail_items] New layout extraction error: {e}")
+            print(f"      [extract_detail_items] SDUI extraction error: {e}")
         
-        # Then try legacy selectors as fallback
+        # Legacy selectors as fallback only when SDUI found nothing
         roots = [
             page.locator("main"),
             page.locator("main ul"),
@@ -106,7 +107,6 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
             page.locator(".pvs-list__outer-container"),
         ]
         selectors = [
-            "li, div[role='listitem'], div.pvs-list__item--one-column",
             "li.pvs-list__paged-list-item",
             "li.artdeco-list__item",
             "div[data-view-name='profile-component-entity']",
@@ -125,7 +125,7 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
                         )
                     ]
                     if part:
-                        print(f"      [extract_detail_items] {len(part)} items from root/sel combo")
+                        print(f"      [extract_detail_items] {len(part)} items from legacy selector")
                     combined = merge_cert_lists(combined, part)
                 except Exception:
                     continue
@@ -137,13 +137,11 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
         last_count = 0
         
         for rnd in range(max_rounds):
-            # Try to scroll main container
+            # Scroll both main container and body
             try:
                 await page.evaluate("document.querySelector('main')?.scrollBy(0, 1500)")
             except Exception:
                 pass
-            
-            # Try to scroll body
             try:
                 await page.evaluate("window.scrollBy(0, 1500)")
             except Exception:
@@ -151,10 +149,12 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
             
             await page.wait_for_timeout(600)
             
-            # Count items currently visible
+            # Count items: both legacy and SDUI
             current = 0
             try:
-                current = await page.locator("main li, main [role='listitem'], div[role='listitem']").count()
+                legacy = await page.locator("main li, main [role='listitem'], div[role='listitem']").count()
+                sdui = await page.locator('[data-view-name="license-certifications-lockup-view"]').count()
+                current = max(legacy, sdui)
             except Exception:
                 pass
             
@@ -252,52 +252,51 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
         """Navigate directly to details pages to capture full certificate list."""
         results: list[dict] = []
         try:
-            base_url = re.sub(r"[?#].*", "", data.url.rstrip("/"))
+            base_url = re.sub(r"[?#].*", "", data.url).rstrip("/")
             detail_urls = [
                 f"{base_url}/details/certifications/",
                 f"{base_url}/details/licenses/",
             ]
             for detail_url in detail_urls:
+                # Skip licenses page if certifications page already found results
+                if results and "licenses" in detail_url:
+                    print(f"      → Skipping {detail_url} (already found {len(results)} certs)")
+                    break
+                
                 print(f"      → Trying: {detail_url}")
-                ok2, err2 = await goto_with_retry(page, detail_url, timeout_ms=max(20000, data.max_wait), tries=2)
+                ok2, err2 = await navigate_via_js(page, detail_url, timeout_ms=max(15000, data.max_wait))
                 if not ok2:
                     print(f"      ✗ Navigation failed: {err2}")
                     continue
+
+                # Quick check for error/404 pages
+                await page.wait_for_timeout(2000)
+                try:
+                    body_text = await page.locator("body").inner_text()
+                    if "page doesn't exist" in body_text.lower() or "page not found" in body_text.lower():
+                        print(f"      ✗ Page doesn't exist, skipping")
+                        debug_msg.append(f"Detail404:{detail_url.split('/')[-2]}")
+                        continue
+                except Exception:
+                    pass
                 
-                # Wait for page to settle
-                await page.wait_for_timeout(2500)
+                # Check if URL actually loaded (didn't redirect back to profile/feed)
+                if not ("details/" in page.url):
+                    print(f"      ✗ Redirected away from detail page: {page.url}")
+                    continue
+                
                 await human_behavior(page)
                 await stabilize_detail_view(page, data.max_wait)
                 
-                # Very aggressive scrolling to load all items
-                for scroll_round in range(6):
-                    await scroll_detail_until_stable(max_rounds=20)
-                    await expand_detail_list(max_clicks=15)
-                    await page.wait_for_timeout(800)
+                # Moderate scrolling
+                for scroll_round in range(2):
+                    await scroll_detail_until_stable(max_rounds=6)
+                    await expand_detail_list(max_clicks=10)
+                    await page.wait_for_timeout(600)
                 
-                # Final aggressive scroll
+                # Final scroll to bottom
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(1200)
-                
-                for _ in range(10):
-                    await page.evaluate("document.querySelector('main')?.scrollBy(0, 2000)")
-                    await page.wait_for_timeout(400)
-                
-                try:
-                    await page.wait_for_selector(
-                        "main li, main [role='listitem'], div[role='listitem']",
-                        timeout=data.max_wait,
-                    )
-                except Exception:
-                    debug_msg.append(f"WaitDetailItemsTimeout:{tag}")
-                
-                # Count items found
-                try:
-                    item_count = await page.locator("main li, main [role='listitem'], div[role='listitem']").count()
-                    print(f"      ✓ Found {item_count} items on detail page")
-                    debug_msg.append(f"DetailPageItems:{item_count}")
-                except Exception:
-                    pass
+                await page.wait_for_timeout(1000)
                 
                 detail_certs = await extract_detail_items(tag)
                 print(f"      ✓ Extracted {len(detail_certs)} certificates")
@@ -324,19 +323,63 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
             debug_msg.append("CDP_FAIL_FALLBACK")
     
     if not use_cdp:
-        # Launch browser and context via modular helpers
-        browser = await launch_browser(headless=(data.headless if data.headless is not None else True), proxy=data.proxy)
-        context = await new_context(browser, locale="en-US", timezone_id="Asia/Jakarta", user_agent=random_user_agent())
-        await apply_stealth(context)
+        # Use persistent context as primary approach (preserves cookies automatically)
+        user_data_dir = Path("browser_data")
+        auth_state_file = Path("auth_state.json")
+        use_persistent = True
 
-        # Load and apply cookies only when we manage the context
         try:
-            cookies = await load_cookies(COOKIES_FILE)
-            cookies_loaded, has_li_at = await apply_cookies(context, cookies)
-            if not has_li_at:
-                print("⚠️ WARNING: li_at cookie not found. Auth will likely fail.")
+            context = await launch_persistent_context(
+                str(user_data_dir),
+                headless=(data.headless if data.headless is not None else True),
+                proxy=data.proxy,
+            )
+            await apply_stealth(context)
+            browser = None  # persistent context does not have a separate browser
+            cookies_loaded = True
+
+            # Also apply cookies from file if they exist (for first-time setup)
+            if not (user_data_dir / "Default" / "Cookies").exists():
+                try:
+                    if auth_state_file.exists():
+                        import json as _json
+                        with open(auth_state_file) as _f:
+                            state = _json.load(_f)
+                        if state.get("cookies"):
+                            await context.add_cookies(state["cookies"])
+                            debug_msg.append("AUTH_STATE_LOADED")
+                    else:
+                        cookies = await load_cookies(COOKIES_FILE)
+                        cookies_loaded, has_li_at = await apply_cookies(context, cookies)
+                        if not has_li_at:
+                            print("⚠️ WARNING: li_at cookie not found. Auth will likely fail.")
+                except Exception as e:
+                    print(f"⚠️ Cookie load error: {e}")
         except Exception as e:
-            print(f"⚠️ Cookie load error: {e}")
+            print(f"⚠️ Persistent context failed: {e}, falling back to regular browser")
+            use_persistent = False
+            browser = await launch_browser(headless=(data.headless if data.headless is not None else True), proxy=data.proxy)
+            if auth_state_file.exists():
+                context = await browser.new_context(
+                    storage_state=str(auth_state_file),
+                    user_agent=random_user_agent(),
+                    viewport={"width": 1920, "height": 1080},
+                    locale="en-US",
+                    timezone_id="Asia/Jakarta",
+                )
+                await apply_stealth(context)
+                cookies_loaded = True
+                debug_msg.append("AUTH_STATE_LOADED_FALLBACK")
+            else:
+                context = await new_context(browser, locale="en-US", timezone_id="Asia/Jakarta", user_agent=random_user_agent())
+                await apply_stealth(context)
+                try:
+                    cookies = await load_cookies(COOKIES_FILE)
+                    cookies_loaded, has_li_at = await apply_cookies(context, cookies)
+                    if not has_li_at:
+                        print("⚠️ WARNING: li_at cookie not found. Auth will likely fail.")
+                except Exception as e:
+                    print(f"⚠️ Cookie load error: {e}")
 
     async def _wire_blockers(p):
         if BLOCK_IMAGES and not data.debug:
@@ -352,6 +395,11 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
                 await page.close()
         except Exception:
             pass
+        try:
+            if context:
+                await context.close()
+        except Exception:
+            pass
         if browser:
             try:
                 if not use_cdp:
@@ -363,13 +411,45 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
     await _wire_blockers(page)
 
     try:
+        # Warm-up: visit LinkedIn feed first to establish session before profile
+        print("🔑 Establishing LinkedIn session...")
+        try:
+            await page.goto("https://www.linkedin.com/feed/", timeout=max(15000, data.max_wait), wait_until="domcontentloaded")
+            await page.wait_for_timeout(2000)
+            # Check if we ended up on authwall/login
+            if any(k in page.url for k in ["authwall", "/login", "/signup"]):
+                print("⚠️ Session warm-up hit authwall, continuing anyway...")
+                debug_msg.append("WARMUP_AUTHWALL")
+            else:
+                print("✅ Session established")
+                debug_msg.append("SESSION_OK")
+        except Exception as e:
+            print(f"⚠️ Session warm-up failed: {e}")
+            debug_msg.append(f"WARMUP_ERR:{str(e)[:30]}")
+
         print(f"🚀 Opening: {data.url}")
 
-        # Navigate dengan retry
-        ok, err = await goto_with_retry(page, data.url, timeout_ms=max(20000, data.max_wait), tries=2)
+        # Navigate via JS to bypass LinkedIn's SDUI client-side interception
+        ok, err = await navigate_via_js(page, data.url, timeout_ms=max(20000, data.max_wait))
         if not ok:
-            print(f"❌ Navigation failed: {err}")
-            return build_error(data, f"Navigation failed: {err}", debug_msg)
+            # Fallback to standard navigation
+            print(f"⚠️ JS navigation failed ({err}), trying standard goto...")
+            debug_msg.append("JS_NAV_FAILED")
+            ok, err = await goto_with_retry(page, data.url, timeout_ms=max(20000, data.max_wait), tries=2)
+            if not ok:
+                print(f"❌ Navigation failed: {err}")
+                return build_error(data, f"Navigation failed: {err}", debug_msg)
+
+        # If redirected away from target, retry
+        if any(k in page.url for k in ["authwall", "/login", "/signup"]) or ("/feed" in page.url and "/in/" in data.url):
+            print("⚠️ Redirected away from profile, retrying...")
+            debug_msg.append("REDIRECT_RETRY")
+            await page.wait_for_timeout(2000)
+            ok, err = await navigate_via_js(page, data.url, timeout_ms=max(20000, data.max_wait))
+            if not ok:
+                print(f"❌ Retry navigation failed: {err}")
+                return build_error(data, f"Navigation retry failed: {err}", debug_msg)
+
         if data.debug:
             await scraper_logging.save_debug_files(page, "landing")
 
@@ -403,7 +483,7 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
                 await _wire_blockers(page)
                 use_cdp = True
                 debug_msg.append("CDP_FAILOVER")
-                ok, err = await goto_with_retry(page, data.url, timeout_ms=max(20000, data.max_wait), tries=2)
+                ok, err = await navigate_via_js(page, data.url, timeout_ms=max(20000, data.max_wait))
                 if not ok:
                     return build_error(data, f"Navigation failed after CDP failover: {err}", debug_msg)
                 if data.debug:
@@ -532,10 +612,10 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
 
         # If detail_only requested, jump straight to detail pages
         if not is_guest and data.detail_only:
-            base_url = re.sub(r"[?#].*", "", data.url.rstrip("/"))
+            base_url = re.sub(r"[?#].*", "", data.url).rstrip("/")
             for detail_url in [f"{base_url}/details/certifications/", f"{base_url}/details/licenses/"]:
                 try:
-                    await page.goto(detail_url, timeout=max(20000, data.max_wait), wait_until="networkidle")
+                    await navigate_via_js(page, detail_url, timeout_ms=max(20000, data.max_wait))
                     await random_delay(2, 4)
                     debug_msg.append("Jump:DetailOnly")
                     break
@@ -574,26 +654,28 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
 
             scraped_details = False
 
-            # Try to scrape from section FIRST before clicking show-all
+            # Try SDUI extraction first (most reliable on new LinkedIn layout)
             print("   Scraping from main section...")
             try:
-                extracted_certs = [
-                    i.dict() for i in await extract_items(page, "li, div[data-view-name='profile-component-entity']", "MainView", root=section, require_visible=False)
-                ]
-                print(f"   Got {len(extracted_certs)} certificates from MainView")
-                debug_msg.append(f"Scraped:MainView:{len(extracted_certs)}")
-                
-                # If nothing, try broader selector
-                if not extracted_certs:
-                    print("   MainView empty, trying MainViewWide...")
-                    extracted_certs = [
-                        i.dict() for i in await extract_items(page, "li, div", "MainViewWide", root=section, require_visible=False)
-                    ]
-                    print(f"   Got {len(extracted_certs)} certificates from MainViewWide")
-                    debug_msg.append(f"Scraped:MainViewWide:{len(extracted_certs)}")
+                sdui_main = await extract_new_layout_items(page, "MainView")
+                if sdui_main:
+                    extracted_certs = [i.dict() for i in sdui_main]
+                    print(f"   Got {len(extracted_certs)} certificates from MainView (SDUI)")
+                    debug_msg.append(f"Scraped:MainViewSDUI:{len(extracted_certs)}")
             except Exception as e:
-                print(f"   ⚠️ MainView extraction failed: {e}")
-                debug_msg.append(f"MainViewError:{str(e)[:30]}")
+                print(f"   ⚠️ MainView SDUI extraction failed: {e}")
+            
+            # Fallback to legacy selectors if SDUI found nothing
+            if not extracted_certs:
+                try:
+                    extracted_certs = [
+                        i.dict() for i in await extract_items(page, "li, div[data-view-name='profile-component-entity']", "MainView", root=section, require_visible=False)
+                    ]
+                    print(f"   Got {len(extracted_certs)} certificates from MainView (legacy)")
+                    debug_msg.append(f"Scraped:MainView:{len(extracted_certs)}")
+                except Exception as e:
+                    print(f"   ⚠️ MainView extraction failed: {e}")
+                    debug_msg.append(f"MainViewError:{str(e)[:30]}")
 
             # Check if there's a "Show all" button indicating more certificates exist
             has_show_all_btn = False
@@ -624,28 +706,23 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
                             clicked_show_all = True
                         except Exception:
                             if href_backup:
-                                await page.goto(
-                                    f"https://www.linkedin.com{href_backup}",
-                                    timeout=max(15000, data.max_wait // 2),
-                                )
-                                clicked_show_all = True
+                                full_href = href_backup if href_backup.startswith("http") else f"https://www.linkedin.com{href_backup}"
+                                ok_nav, _ = await navigate_via_js(page, full_href, timeout_ms=max(15000, data.max_wait))
+                                clicked_show_all = ok_nav
                         
                         if clicked_show_all:
-                            # Use domcontentloaded instead of networkidle to avoid timeout on infinite scroll
                             try:
                                 await page.wait_for_load_state("domcontentloaded", timeout=max(10000, data.max_wait // 2))
                             except Exception:
-                                print(f"⚠️ Page load timeout, continuing anyway...")
-                                debug_msg.append("PageLoadTimeout")
+                                pass
                             
-                            await page.wait_for_timeout(1500)  # Brief pause for rendering
+                            await page.wait_for_timeout(2000)
 
-                            # Check if redirected to external domain (e.g., Credly)
+                            # Check if redirected to external domain
                             if "linkedin.com" not in page.url:
                                 print(f"   🚫 External redirect detected: {page.url[:80]}")
                                 debug_msg.append("ExternalRedirect")
-                                # Go back to LinkedIn profile
-                                await page.goto(current_url, timeout=max(15000, data.max_wait))
+                                ok_back, _ = await navigate_via_js(page, current_url, timeout_ms=15000)
                                 await page.wait_for_timeout(1500)
                                 clicked_show_all = False
                     except Exception as e:
@@ -653,59 +730,54 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
                         debug_msg.append(f"ShowAllError: {str(e)[:30]}")
                         clicked_show_all = False
                 
-                # Second try: direct navigation to details page if button click didn't work
-                if not clicked_show_all or "details/" not in page.url:
+                # If click worked and we're on details page, extract from it
+                if clicked_show_all and "details/" in page.url:
+                    print(f"   ✓ Details page loaded: {page.url}")
+                    await human_behavior(page)
+                    await stabilize_detail_view(page, data.max_wait)
+                    
+                    for scroll_round in range(4):
+                        await scroll_detail_until_stable(max_rounds=10)
+                        await expand_detail_list(max_clicks=10)
+                        await page.wait_for_timeout(600)
+                    
+                    # Extra scrolls to bottom to ensure lazy-loaded items appear
+                    for _ in range(5):
+                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        await page.wait_for_timeout(800)
+                    
+                    detail_certs = await extract_detail_items("DetailView")
+                    print(f"   Extracted {len(detail_certs)} certificates from detail page")
+                    extracted_certs = merge_cert_lists(extracted_certs, detail_certs)
+                    scraped_details = True
+                    debug_msg.append(f"Scraped:DetailView:{len(detail_certs)}")
+                
+                # If click worked but URL didn't change to details, try SDUI on current page
+                elif clicked_show_all:
+                    print(f"   Show all clicked, URL: {page.url}")
+                    await page.wait_for_timeout(2000)
+                    await human_behavior(page)
+                    
+                    # Try SDUI extraction on current page (might have loaded more items)
+                    try:
+                        sdui_post_click = await extract_new_layout_items(page, "PostClick")
+                        if sdui_post_click:
+                            post_click_certs = [i.dict() for i in sdui_post_click]
+                            print(f"   Got {len(post_click_certs)} certs after Show All click (SDUI)")
+                            extracted_certs = merge_cert_lists(extracted_certs, post_click_certs)
+                            scraped_details = True
+                            debug_msg.append(f"Scraped:PostClick:{len(post_click_certs)}")
+                    except Exception as e:
+                        print(f"   ⚠️ Post-click SDUI extraction failed: {e}")
+                
+                # Fallback: direct navigation to details page
+                if not scraped_details:
                     print("   ↪️ Directly navigating to details page...")
                     detail_certs = await try_detail_fallback("DetailDirect")
                     if detail_certs:
                         extracted_certs = merge_cert_lists(extracted_certs, detail_certs)
                         scraped_details = True
                         debug_msg.append(f"Scraped:DetailDirect:{len(detail_certs)}")
-                
-                # If we're on details page (from button click), extract
-                if "details/certifications" in page.url or "details/licenses" in page.url:
-                    if not scraped_details:
-                        print("   ✓ Details page loaded, scrolling to load all items...")
-                        await page.wait_for_timeout(2000)  # Wait for initial render
-                        await human_behavior(page)
-                        await stabilize_detail_view(page, data.max_wait)
-                        
-                        # Multiple rounds of aggressive scrolling and expanding
-                        for scroll_round in range(5):
-                            print(f"   [Scroll Round {scroll_round+1}/5] Scrolling and expanding...")
-                            await scroll_detail_until_stable(max_rounds=20)
-                            await expand_detail_list(max_clicks=15)
-                            await page.wait_for_timeout(800)
-                        
-                        # Final scroll to bottom
-                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        await page.wait_for_timeout(1500)
-                        
-                        # Extra scroll to ensure everything is loaded
-                        for _ in range(8):
-                            await page.evaluate("document.querySelector('main')?.scrollBy(0, 2000)")
-                            await page.wait_for_timeout(500)
-                        
-                        try:
-                            await page.wait_for_selector(
-                                "main li, main [role='listitem'], div[role='listitem']",
-                                timeout=data.max_wait,
-                            )
-                        except Exception:
-                            debug_msg.append("WaitDetailItemsTimeout")
-                        try:
-                            item_count = await page.locator("main li, main [role='listitem'], div[role='listitem']").count()
-                            print(f"   Detail items detected: {item_count}")
-                            debug_msg.append(f"DetailItems:{item_count}")
-                        except Exception:
-                            pass
-                        detail_certs = await extract_detail_items("DetailView")
-                        print(f"   Extracted {len(detail_certs)} certificates from detail page")
-                        extracted_certs = merge_cert_lists(extracted_certs, detail_certs)
-                        scraped_details = True
-                        debug_msg.append("Scraped:DetailView")
-                        if data.debug and not extracted_certs:
-                            await scraper_logging.save_debug_files(page, "detail_empty")
 
             # Fallback: Scrape from main view (if not already scraped and show-all didn't work)
             if not scraped_details and not extracted_certs:
@@ -807,40 +879,44 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
             # Fallback: force navigate to details/certifications when logged in
             if not is_guest:
                 try:
-                    base_url = re.sub(r"[?#].*", "", data.url.rstrip("/"))
+                    base_url = re.sub(r"[?#].*", "", data.url).rstrip("/")
                     detail_urls = [
                         f"{base_url}/details/certifications/",
                         f"{base_url}/details/licenses/"
                     ]
                     for detail_url in detail_urls:
+                        # Skip licenses if certifications already found
+                        if extracted_certs and "licenses" in detail_url:
+                            break
+                        
                         print(f"🔄 Trying fallback URL: {detail_url}")
                         try:
-                            ok2, err2 = await goto_with_retry(page, detail_url, timeout_ms=max(20000, data.max_wait), tries=1)
+                            ok2, err2 = await navigate_via_js(page, detail_url, timeout_ms=max(15000, data.max_wait))
                             if not ok2:
                                 continue
+                            # Quick check for 404 / "page doesn't exist"
+                            await page.wait_for_timeout(2000)
+                            try:
+                                body_text = await page.locator("body").inner_text()
+                                if "page doesn't exist" in body_text.lower() or "page not found" in body_text.lower():
+                                    print(f"   Page doesn't exist, skipping")
+                                    continue
+                            except Exception:
+                                pass
+                            
+                            if "details/" not in page.url:
+                                print(f"   Redirected away: {page.url}")
+                                continue
+                            
                             await human_behavior(page)
                             await stabilize_detail_view(page, data.max_wait)
                             await expand_detail_list()
                             await scroll_detail_until_stable()
-                            try:
-                                await page.wait_for_selector(
-                                    "main li, main [role='listitem'], div[role='listitem']",
-                                    timeout=data.max_wait,
-                                )
-                            except Exception:
-                                debug_msg.append("WaitDetailItemsTimeoutFB")
-                            try:
-                                item_count_fb = await page.locator("main li, main [role='listitem'], div[role='listitem']").count()
-                                print(f"   Detail items detected (fallback): {item_count_fb}")
-                                debug_msg.append(f"DetailItemsFB:{item_count_fb}")
-                            except Exception:
-                                pass
-                            extracted_certs = [
-                                i.dict()
-                                for i in await extract_items(
-                                    page, "main, div[role='main']", "DetailFallback", require_visible=False
-                                )
-                            ]
+                            
+                            # Use extract_detail_items which tries SDUI first
+                            extracted_certs = await extract_detail_items("DetailFallback")
+                            print(f"   Extraction result: {len(extracted_certs)} certs")
+                            
                             if extracted_certs:
                                 debug_msg.append("Fallback:DetailPage")
                                 section_found = True

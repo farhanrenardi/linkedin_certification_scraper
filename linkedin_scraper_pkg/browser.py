@@ -2,6 +2,9 @@ from playwright.async_api import Browser, BrowserContext
 from playwright.async_api import async_playwright
 from .config import random_user_agent, SLOW_MO_MS
 
+# Keep a module-level reference to prevent garbage collection
+_playwright_instance = None
+
 
 async def launch_browser(headless: bool = True, proxy: str | None = None) -> Browser:
     """Launch a Chromium browser with defensive flags for scraping.
@@ -9,8 +12,9 @@ async def launch_browser(headless: bool = True, proxy: str | None = None) -> Bro
     Headless and proxy are configurable per request. We avoid GPU and
     extension features and disable automation signals where possible.
     """
-    p = await async_playwright().start()
-    browser = await p.chromium.launch(
+    global _playwright_instance
+    _playwright_instance = await async_playwright().start()
+    browser = await _playwright_instance.chromium.launch(
       headless=headless,
       proxy={"server": proxy} if proxy else None,
       slow_mo=SLOW_MO_MS if SLOW_MO_MS > 0 else None,
@@ -33,6 +37,51 @@ async def launch_browser(headless: bool = True, proxy: str | None = None) -> Bro
       ],
     )
     return browser
+
+
+async def launch_persistent_context(
+    user_data_dir: str,
+    headless: bool = True,
+    proxy: str | None = None,
+) -> BrowserContext:
+    """Launch a Chromium browser with a persistent user data directory.
+
+    Cookies and localStorage are preserved between runs automatically.
+    Returns a BrowserContext (not a Browser) since persistent contexts
+    combine both.
+    """
+    global _playwright_instance
+    _playwright_instance = await async_playwright().start()
+    context = await _playwright_instance.chromium.launch_persistent_context(
+        user_data_dir,
+        headless=headless,
+        proxy={"server": proxy} if proxy else None,
+        slow_mo=SLOW_MO_MS if SLOW_MO_MS > 0 else None,
+        user_agent=random_user_agent(),
+        viewport={"width": 1920, "height": 1080},
+        locale="en-US",
+        timezone_id="Asia/Jakarta",
+        permissions=["geolocation"],
+        has_touch=False,
+        is_mobile=False,
+        device_scale_factor=1,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-infobars",
+            "--window-size=1920,1080",
+            "--disable-dev-shm-usage",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-accelerated-2d-canvas",
+            "--disable-gpu",
+            "--hide-scrollbars",
+            "--mute-audio",
+            "--no-first-run",
+            "--disable-extensions",
+        ],
+    )
+    return context
 
 
 async def new_context(

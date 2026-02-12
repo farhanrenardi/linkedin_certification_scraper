@@ -20,120 +20,158 @@ def _is_help_or_prefs_link(url: str) -> bool:
 async def extract_new_layout_items(page: Page, source: str) -> List[CertificateItem]:
     """Extract certificates from LinkedIn's new SDUI layout.
     
-    The new layout uses:
-    - <a data-view-name="license-certifications-lockup-view"> for company links
-    - <p class="ddde811d _94c14fcf ..."> for certificate titles
-    - <p class="ddde811d _19ee2a11 ..."> for issuer and dates
-    - <hr> separators between items
+    DOM structure (per cert entry):
+      <div>                                          ← lockup's immediate parent
+        <a data-view-name="license-certifications-lockup-view" href="/company/...">
+        <div>                                        ← sibling with cert text
+          <p>Cert Name</p>
+          <p>Issuer</p>
+          <p>Issued Aug 2023</p>
+          <p>Credential ID XXX</p>
+          <div data-view-name="license-certifications-see-skills-button">...</div>
+        </div>
+      </div>
     """
     results: List[CertificateItem] = []
     
-    # Find all certification entries using the data-view-name attribute
-    lockup_views = page.locator('[data-view-name="license-certifications-lockup-view"]')
-    count = await lockup_views.count()
+    lockups = page.locator('[data-view-name="license-certifications-lockup-view"]')
+    count = await lockups.count()
     print(f"[extraction.py] Found {count} certification lockup views (source: {source})")
     
     if count == 0:
         return results
     
-    # Process each certification entry
     for i in range(count):
         try:
-            lockup = lockup_views.nth(i)
+            lockup = lockups.nth(i)
             
-            # Get the parent container that holds all cert info
-            # Navigate up to find the full certification block
-            parent = lockup.locator("xpath=./ancestor::div[contains(@class, '_43f1157d')][1]")
+            # Get the lockup's immediate parent — this is the cert block
+            parent = lockup.locator("xpath=..")
             if await parent.count() == 0:
-                parent = lockup.locator("xpath=./ancestor::div[5]")
+                continue
             
-            # Get all text from the certification block
             text_content = ""
             try:
                 text_content = await parent.inner_text()
-            except:
-                try:
-                    text_content = await lockup.inner_text()
-                except:
-                    continue
-            
-            lines = [l.strip() for l in text_content.split("\n") if l.strip()]
-            
-            # Filter out common garbage
-            garbage = ["Show credential", "Show all", "Skills:", "logo"]
-            lines = [l for l in lines if not any(g.lower() in l.lower() for g in garbage)]
-            
-            if len(lines) < 2:
+            except Exception:
                 continue
             
-            # Extract certificate name (usually first non-logo line)
-            cert_name = ""
-            for line in lines:
-                if "logo" not in line.lower() and len(line) > 5:
-                    cert_name = line
-                    break
-            
-            if not cert_name or len(cert_name) < 5:
+            if not text_content or len(text_content.strip()) < 5:
                 continue
             
-            # Extract issuer (usually right after cert name, often company name)
-            issuer = ""
-            for j, line in enumerate(lines):
-                if line == cert_name and j + 1 < len(lines):
-                    issuer = lines[j + 1]
-                    break
-            
-            # Extract dates
-            issue_date = ""
-            expiry_date = ""
-            for line in lines:
-                if re.search(r"Issued\s+", line, re.I):
-                    m = re.search(r"Issued\s+(.+)", line, re.I)
-                    if m:
-                        issue_date = m.group(1).strip()
-                elif re.search(r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}$", line, re.I):
-                    if not issue_date:
-                        issue_date = line
-            
-            # Extract credential ID
-            cred_id = ""
-            for line in lines:
-                m = re.search(r"Credential ID\s*:?\s*([A-Za-z0-9\-\./:]+)", line, re.I)
-                if m:
-                    cred_id = m.group(1)
-                    break
-            
-            # Extract verify link
-            verify_link = ""
+            # Get company link from lockup href
+            company_link = ""
             try:
-                see_button = parent.locator('[data-view-name="license-certifications-see-license-button"]')
-                if await see_button.count() > 0:
-                    href = await see_button.get_attribute("href")
-                    if href:
-                        verify_link = href if href.startswith("http") else f"https://www.linkedin.com{href}"
-            except:
+                href = await lockup.get_attribute("href")
+                if href:
+                    company_link = href if href.startswith("http") else f"https://www.linkedin.com{href}"
+            except Exception:
                 pass
             
-            # Skip help/prefs links
-            if _is_help_or_prefs_link(verify_link):
-                continue
-            
-            results.append(
-                CertificateItem(
-                    certificate_name=cert_name,
-                    credential_id=cred_id,
-                    issuer=issuer,
-                    issue_date=issue_date,
-                    expiry_date=expiry_date,
-                    verify_link=verify_link,
-                    source=source + "_newLayout",
-                )
-            )
+            result = _parse_cert_text(text_content, company_link, source + "_newLayout")
+            if result:
+                results.append(result)
         except Exception as e:
             print(f"[extraction.py] Error processing lockup {i}: {e}")
             continue
     
     return results
+
+
+def _parse_cert_text(text: str, company_link: str, source: str) -> "CertificateItem | None":
+    """Parse cert text block into a CertificateItem.
+    
+    Expected text format:
+      Cert Name
+      Issuer Name
+      Issued Aug 2023
+      Credential ID XXX
+      Skills: ...  (skip)
+    """
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    
+    # Stop at "Skills:" line — everything after is not cert info
+    clean_lines = []
+    for l in lines:
+        if l.lower().startswith("skills:") or l.lower().startswith("attached media"):
+            break
+        clean_lines.append(l)
+    
+    if not clean_lines:
+        return None
+    
+    cert_name = ""
+    issuer = ""
+    issue_date = ""
+    expiry_date = ""
+    cred_id = ""
+    verify_link = ""
+    
+    # First line = certificate name
+    cert_name = clean_lines[0]
+    
+    # Process remaining lines
+    for j in range(1, len(clean_lines)):
+        line = clean_lines[j]
+        
+        # Check for "Issued XXX" pattern
+        m_issued = re.search(r"^Issued\s+(.+)", line, re.I)
+        if m_issued:
+            issue_date = m_issued.group(1).strip()
+            # Check for "Issued Aug 2023 · Expires Dec 2025" pattern
+            if "·" in issue_date:
+                parts = issue_date.split("·")
+                issue_date = parts[0].strip()
+                if len(parts) > 1:
+                    exp_part = parts[1].strip()
+                    m_exp = re.search(r"Expire[sd]?\s+(.+)", exp_part, re.I)
+                    if m_exp:
+                        expiry_date = m_exp.group(1).strip()
+                    elif "no expiration" in exp_part.lower():
+                        expiry_date = "No Expiration Date"
+            continue
+        
+        # Check for "Expires XXX" pattern
+        m_exp = re.search(r"^Expire[sd]?\s+(.+)", line, re.I)
+        if m_exp:
+            expiry_date = m_exp.group(1).strip()
+            continue
+        
+        if "no expiration" in line.lower():
+            expiry_date = "No Expiration Date"
+            continue
+        
+        # Check for "Credential ID XXX" pattern
+        m_cred = re.search(r"^Credential ID\s*:?\s*(.+)", line, re.I)
+        if m_cred:
+            cred_id = m_cred.group(1).strip()
+            continue
+        
+        # If nothing matched and we haven't set issuer, this is the issuer
+        if not issuer:
+            issuer = line
+    
+    # Validate cert name
+    if not cert_name or len(cert_name) < 2:
+        return None
+    
+    # Skip if cert_name looks like garbage
+    if cert_name.lower() in ["show all", "show credential", "see credential"]:
+        return None
+    
+    # Use company link as verify_link if available
+    if company_link and not _is_help_or_prefs_link(company_link):
+        verify_link = company_link
+    
+    return CertificateItem(
+        certificate_name=cert_name,
+        credential_id=cred_id,
+        issuer=issuer,
+        issue_date=issue_date,
+        expiry_date=expiry_date,
+        verify_link=verify_link,
+        source=source,
+    )
 
 
 async def extract_items(
