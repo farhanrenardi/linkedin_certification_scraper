@@ -61,3 +61,9 @@ debug_artifacts/
 # Output files
 results*.json
 output*.json
+
+# Browser/profile data
+browser_data/
+
+# Sensitive local auth files
+auth_state.json
