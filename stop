@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+kill_pid() {
+  local pid="$1"
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 1
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill -9 "$pid" >/dev/null 2>&1 || true
+    fi
+  fi
+}
+
+kill_pgid() {
+  local pgid="$1"
+  if kill -0 "$pgid" >/dev/null 2>&1; then
+    kill -TERM "-$pgid" >/dev/null 2>&1 || true
+    sleep 1
+    if kill -0 "$pgid" >/dev/null 2>&1; then
+      kill -KILL "-$pgid" >/dev/null 2>&1 || true
+    fi
+  fi
+}
+
+if [[ -f ".run_ui.pid" ]]; then
+  RUN_PID=$(cat .run_ui.pid)
+  kill_pid "$RUN_PID"
+  rm -f .run_ui.pid
+fi
+
+if [[ -f ".cdp.pid" ]]; then
+  CDP_PID=$(cat .cdp.pid)
+  kill_pgid "$CDP_PID"
+  rm -f .cdp.pid
+fi
+
+if [[ -f ".cdp.profile" ]]; then
+  CDP_PROFILE=$(cat .cdp.profile)
+  rm -f .cdp.profile
+else
+  CDP_PROFILE=""
+fi
+
+# Fallbacks to ensure CDP Chrome closes
+pkill -f "remote-debugging-port=9222" >/dev/null 2>&1 || true
+if [[ -n "$CDP_PROFILE" ]]; then
+  pkill -f "$CDP_PROFILE" >/dev/null 2>&1 || true
+fi
+
+echo "✅ Stopped UI and CDP (if running)."
