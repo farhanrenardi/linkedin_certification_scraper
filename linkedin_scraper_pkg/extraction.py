@@ -18,63 +18,268 @@ def _is_help_or_prefs_link(url: str) -> bool:
 
 
 async def extract_new_layout_items(page: Page, source: str) -> List[CertificateItem]:
-    """Extract certificates from LinkedIn's new SDUI layout.
-    
-    DOM structure (per cert entry):
-      <div>                                          ← lockup's immediate parent
-        <a data-view-name="license-certifications-lockup-view" href="/company/...">
-        <div>                                        ← sibling with cert text
-          <p>Cert Name</p>
-          <p>Issuer</p>
-          <p>Issued Aug 2023</p>
-          <p>Credential ID XXX</p>
-          <div data-view-name="license-certifications-see-skills-button">...</div>
-        </div>
-      </div>
+    """Extract certificates from LinkedIn's SDUI layout.
+
+    Uses three strategies in order:
+      A. ``see-license-button`` anchors  – walk up from each credential
+         button to the cert-row div (the one that has a ``<figure>``
+         child for the issuer logo) and parse its text.
+      B. HR-separated list container – on the detail page the cert items
+         live inside a div whose direct children alternate ``div / hr``.
+         Find it via ``<hr>`` inside ``profile-certifications-details-view``
+         and iterate the ``<div>`` children.
+      C. Old ``lockup-view`` selector (backward compat).
     """
     results: List[CertificateItem] = []
-    
-    lockups = page.locator('[data-view-name="license-certifications-lockup-view"]')
-    count = await lockups.count()
-    print(f"[extraction.py] Found {count} certification lockup views (source: {source})")
-    
-    if count == 0:
-        return results
-    
-    for i in range(count):
+    seen_names: set = set()
+
+    # ------------------------------------------------------------------
+    # Strategy A – see-license-button anchors
+    # ------------------------------------------------------------------
+    buttons = page.locator(
+        '[data-view-name="license-certifications-see-license-button"]'
+    )
+    btn_count = await buttons.count()
+    print(
+        f"[extraction.py] Found {btn_count} see-license-button elements "
+        f"(source: {source})"
+    )
+
+    if btn_count > 0:
+        for i in range(btn_count):
+            try:
+                btn = buttons.nth(i)
+
+                # Walk up from button to the cert-row container.
+                # The cert-row is the nearest ancestor <div> that has a
+                # <figure> direct child (the issuer logo).
+                cert_row = btn.locator("xpath=ancestor::div[child::figure]")
+                row_count = await cert_row.count()
+                if row_count == 0:
+                    # Fallback: just grab inner_text of everything
+                    # five levels above the <a> button tag.
+                    cert_row = btn
+                    for _ in range(5):
+                        cert_row = cert_row.locator("xpath=..")
+                else:
+                    cert_row = cert_row.first
+
+                text_content = ""
+                try:
+                    text_content = await cert_row.inner_text()
+                except Exception:
+                    continue
+
+                if not text_content or len(text_content.strip()) < 5:
+                    continue
+
+                # Credential verify link from the button <a> href
+                verify_link = ""
+                try:
+                    href = await btn.get_attribute("href")
+                    if href:
+                        verify_link = (
+                            href
+                            if href.startswith("http")
+                            else f"https://www.linkedin.com{href}"
+                        )
+                except Exception:
+                    pass
+
+                result = _parse_cert_text(
+                    text_content, verify_link, source + "_newLayout"
+                )
+                if result and result.certificate_name not in seen_names:
+                    seen_names.add(result.certificate_name)
+                    results.append(result)
+            except Exception as e:
+                print(
+                    f"[extraction.py] Error processing see-license button {i}: {e}"
+                )
+                continue
+
+    # ------------------------------------------------------------------
+    # Strategy B – HR-separated list container
+    # ------------------------------------------------------------------
+    if not results:
         try:
-            lockup = lockups.nth(i)
-            
-            # Get the lockup's immediate parent — this is the cert block
-            parent = lockup.locator("xpath=..")
-            if await parent.count() == 0:
-                continue
-            
-            text_content = ""
-            try:
-                text_content = await parent.inner_text()
-            except Exception:
-                continue
-            
-            if not text_content or len(text_content.strip()) < 5:
-                continue
-            
-            # Get company link from lockup href
-            company_link = ""
-            try:
-                href = await lockup.get_attribute("href")
-                if href:
-                    company_link = href if href.startswith("http") else f"https://www.linkedin.com{href}"
-            except Exception:
-                pass
-            
-            result = _parse_cert_text(text_content, company_link, source + "_newLayout")
-            if result:
-                results.append(result)
+            detail_view = page.locator(
+                '[data-view-name="profile-certifications-details-view"]'
+            )
+            if await detail_view.count() > 0:
+                hrs = detail_view.locator("hr")
+                hr_count = await hrs.count()
+                print(
+                    f"[extraction.py] Found {hr_count} <hr> separators "
+                    f"in details view (source: {source})"
+                )
+
+                if hr_count >= 1:
+                    # Parent of the first HR is the list container
+                    list_container = hrs.first.locator("xpath=..")
+                    cert_divs = list_container.locator("xpath=child::div")
+                    div_count = await cert_divs.count()
+                    print(
+                        f"[extraction.py] {div_count} direct div children "
+                        f"in list container"
+                    )
+
+                    for j in range(div_count):
+                        try:
+                            item = cert_divs.nth(j)
+                            text_content = await item.inner_text()
+                            if not text_content or len(text_content.strip()) < 10:
+                                continue
+
+                            # Try to find a credential link inside this item
+                            verify_link = ""
+                            try:
+                                see_btn = item.locator(
+                                    '[data-view-name="license-certifications-see-license-button"]'
+                                )
+                                if await see_btn.count() > 0:
+                                    href = await see_btn.first.get_attribute("href")
+                                    if href:
+                                        verify_link = (
+                                            href
+                                            if href.startswith("http")
+                                            else f"https://www.linkedin.com{href}"
+                                        )
+                            except Exception:
+                                pass
+
+                            result = _parse_cert_text(
+                                text_content, verify_link, source + "_listContainer"
+                            )
+                            if result and result.certificate_name not in seen_names:
+                                seen_names.add(result.certificate_name)
+                                results.append(result)
+                        except Exception:
+                            continue
         except Exception as e:
-            print(f"[extraction.py] Error processing lockup {i}: {e}")
-            continue
-    
+            print(f"[extraction.py] HR-list extraction error: {e}")
+
+    # ------------------------------------------------------------------
+    # Strategy C – lockup-view selector (always runs as supplement)
+    # ------------------------------------------------------------------
+    # Some certs have lockup-view elements but no see-license-button.
+    # Always run to supplement results from Strategy A.
+    if True:
+        lockups = page.locator(
+            '[data-view-name="license-certifications-lockup-view"]'
+        )
+        count = await lockups.count()
+        if count > 0:
+            print(
+                f"[extraction.py] Strategy C: {count} lockup-view elements "
+                f"(source: {source})"
+            )
+
+        for i in range(count):
+            try:
+                lockup = lockups.nth(i)
+                parent = lockup.locator("xpath=..")
+                if await parent.count() == 0:
+                    continue
+
+                text_content = ""
+                try:
+                    text_content = await parent.inner_text()
+                except Exception:
+                    continue
+
+                if not text_content or len(text_content.strip()) < 5:
+                    continue
+
+                company_link = ""
+                try:
+                    href = await lockup.get_attribute("href")
+                    if href:
+                        company_link = (
+                            href
+                            if href.startswith("http")
+                            else f"https://www.linkedin.com{href}"
+                        )
+                except Exception:
+                    pass
+
+                result = _parse_cert_text(
+                    text_content, company_link, source + "_newLayout"
+                )
+                if result and result.certificate_name not in seen_names:
+                    seen_names.add(result.certificate_name)
+                    results.append(result)
+            except Exception as e:
+                print(f"[extraction.py] Error processing lockup {i}: {e}")
+                continue
+
+    # ------------------------------------------------------------------
+    # Strategy D – figure-based cert cards (supplement + fallback)
+    # ------------------------------------------------------------------
+    # Some certs have no see-license-button and no lockup-view.
+    # They appear as divs with a <figure> (issuer logo) child.
+    # Always runs to pick up certs missed by earlier strategies.
+    if True:
+        try:
+            # Find divs inside main that have a direct figure child
+            figure_parents = page.locator("main div:has(> figure)")
+            fp_count = await figure_parents.count()
+            print(
+                f"[extraction.py] Strategy D: {fp_count} figure-parent divs "
+                f"(source: {source})"
+            )
+
+            for k in range(fp_count):
+                try:
+                    card = figure_parents.nth(k)
+                    text_content = ""
+                    try:
+                        text_content = await card.inner_text()
+                    except Exception:
+                        continue
+
+                    if not text_content or len(text_content.strip()) < 5:
+                        continue
+
+                    # Only consider items that look like certs
+                    # (must have "Issued" or "Credential ID" in text)
+                    if not re.search(
+                        r"Issued|Credential ID|Diterbitkan|ID Kredensial",
+                        text_content,
+                        re.I,
+                    ):
+                        continue
+
+                    # Try to find credential link
+                    verify_link = ""
+                    try:
+                        a_link = card.locator(
+                            'a[href*="credential"], '
+                            'a[href*="redir/redirect"], '
+                            '[data-view-name="license-certifications-see-license-button"]'
+                        )
+                        if await a_link.count() > 0:
+                            href = await a_link.first.get_attribute("href")
+                            if href:
+                                verify_link = (
+                                    href
+                                    if href.startswith("http")
+                                    else f"https://www.linkedin.com{href}"
+                                )
+                    except Exception:
+                        pass
+
+                    result = _parse_cert_text(
+                        text_content, verify_link, source + "_figureCard"
+                    )
+                    if result and result.certificate_name not in seen_names:
+                        seen_names.add(result.certificate_name)
+                        results.append(result)
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"[extraction.py] Strategy D error: {e}")
+
     return results
 
 
@@ -158,6 +363,19 @@ def _parse_cert_text(text: str, company_link: str, source: str) -> "CertificateI
     # Skip if cert_name looks like garbage
     if cert_name.lower() in ["show all", "show credential", "see credential"]:
         return None
+    
+    # If cert_name looks like a URL or LinkedIn internal action link,
+    # fall back to the issuer name as the cert name
+    if (
+        re.match(r'^https?://', cert_name, re.I)
+        or re.match(r'^www\.', cert_name, re.I)
+        or 'linkedin.com/profile/add' in cert_name.lower()
+    ):
+        if issuer:
+            cert_name = issuer
+            issuer = ""
+        else:
+            return None
     
     # Use company link as verify_link if available
     if company_link and not _is_help_or_prefs_link(company_link):

@@ -153,8 +153,9 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
             current = 0
             try:
                 legacy = await page.locator("main li, main [role='listitem'], div[role='listitem']").count()
-                sdui = await page.locator('[data-view-name="license-certifications-lockup-view"]').count()
-                current = max(legacy, sdui)
+                sdui_new = await page.locator('[data-view-name="license-certifications-see-license-button"]').count()
+                sdui_old = await page.locator('[data-view-name="license-certifications-lockup-view"]').count()
+                current = max(legacy, sdui_new, sdui_old)
             except Exception:
                 pass
             
