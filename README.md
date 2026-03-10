@@ -67,7 +67,7 @@ A powerful web scraping tool that automatically extracts professional certificat
 **macOS / Linux:**
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/linkedin_certification_scraper.git
+git clone https://github.com/farhanrenardi/linkedin_certification_scraper.git
 cd linkedin_certification_scraper
 
 # Run the installer
@@ -77,7 +77,7 @@ cd linkedin_certification_scraper
 **Windows (PowerShell):**
 ```powershell
 # Clone the repository
-git clone https://github.com/yourusername/linkedin_certification_scraper.git
+git clone https://github.com/farhanrenardi/linkedin_certification_scraper.git
 cd linkedin_certification_scraper
 
 # Run the installer
