@@ -81,6 +81,7 @@ git clone https://github.com/farhanrenardi/linkedin_certification_scraper.git
 cd linkedin_certification_scraper
 
 # Run the installer
+Set-ExecutionPolicy -Scope CurrentUser RemotSigned -Force;
 .\install.ps1 needs
 ```
 
