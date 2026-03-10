@@ -89,7 +89,7 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
         
         # First try the new SDUI layout extraction (most reliable)
         try:
-            new_layout_items = await extract_new_layout_items(page, label)
+            new_layout_items = await extract_new_layout_items(page, label, strict_filter=False)
             if new_layout_items:
                 print(f"      [extract_detail_items] {len(new_layout_items)} items from SDUI layout")
                 combined = [i.dict() for i in new_layout_items]
@@ -149,13 +149,16 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
             
             await page.wait_for_timeout(600)
             
-            # Count items: both legacy and SDUI
+            # Count items: 2025+ layout uses <hr> separators and figure-parent divs
             current = 0
             try:
-                legacy = await page.locator("main li, main [role='listitem'], div[role='listitem']").count()
-                sdui_new = await page.locator('[data-view-name="license-certifications-see-license-button"]').count()
-                sdui_old = await page.locator('[data-view-name="license-certifications-lockup-view"]').count()
-                current = max(legacy, sdui_new, sdui_old)
+                # New layout: count <hr> separators (each cert is separated by <hr>)
+                hr_count = await page.locator("main hr").count()
+                # New layout: count divs with figure children (cert cards)
+                fig_count = await page.locator("main div:has(> figure)").count()
+                # Legacy selectors
+                legacy = await page.locator("main li, main [role='listitem']").count()
+                current = max(hr_count, fig_count, legacy)
             except Exception:
                 pass
             
@@ -173,12 +176,16 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
                 break
 
     async def expand_detail_list(max_clicks: int = 20) -> None:
-        """Click "Show more" / "Load more" buttons in detail pages to load additional items."""
+        """Click "Show more" / "Load more" buttons/links in detail pages to load additional items."""
         consecutive_failures = 0
         for i in range(max_clicks):
             clicked = False
             try:
-                # Try multiple button patterns - be very aggressive
+                # First scroll to bottom to expose Load More
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(800)
+                
+                # Try button role patterns
                 patterns = [
                     r"show\s+more|show\s+all|show\s+more\s+results|see\s+more|tampilkan\s+lebih",
                     r"load\s+more|muat\s+lebih|muat\s+selengkapnya",
@@ -189,7 +196,6 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
                         btns = page.get_by_role("button", name=re.compile(pattern, re.I))
                         btn_count = await btns.count()
                         if btn_count > 0:
-                            # Take the first visible button
                             for j in range(btn_count):
                                 btn = btns.nth(j)
                                 try:
@@ -197,7 +203,7 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
                                         await btn.scroll_into_view_if_needed()
                                         await btn.click(timeout=8000)
                                         print(f"      [expand_detail] Clicked button #{j} matching '{pattern}' (round {i+1})")
-                                        await page.wait_for_timeout(1500)
+                                        await page.wait_for_timeout(2000)
                                         clicked = True
                                         consecutive_failures = 0
                                         break
@@ -208,25 +214,27 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
                     except:
                         continue
                 
+                # Try text-based selectors (both <button> and <a> elements)
                 if not clicked:
-                    # Also try finding by text content with more variations
                     try:
                         text_patterns = [
                             "Load more", "Show more", "Show all", "View more",
-                            "Tampilkan lebih", "Muat lebih", "Lihat selengkapnya"
+                            "Tampilkan lebih", "Muat lebih", "Lihat selengkapnya",
+                            "Muat lainnya",
                         ]
                         for text_pat in text_patterns:
-                            load_more = page.locator(f"button:has-text('{text_pat}')")
-                            if await load_more.count() > 0:
-                                visible_count = 0
-                                for idx in range(await load_more.count()):
+                            # Search both buttons AND anchor/link elements
+                            load_more = page.locator(f"button:has-text('{text_pat}'), main a:has-text('{text_pat}')")
+                            lm_count = await load_more.count()
+                            if lm_count > 0:
+                                for idx in range(lm_count):
                                     btn = load_more.nth(idx)
                                     try:
                                         if await btn.is_visible():
                                             await btn.scroll_into_view_if_needed()
                                             await btn.click(timeout=8000)
                                             print(f"      [expand_detail] Clicked '{text_pat}' (round {i+1})")
-                                            await page.wait_for_timeout(1500)
+                                            await page.wait_for_timeout(2000)
                                             clicked = True
                                             consecutive_failures = 0
                                             break
@@ -234,6 +242,22 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
                                         continue
                                 if clicked:
                                     break
+                    except:
+                        pass
+                
+                # Try generic text match (getByText) as last resort
+                if not clicked:
+                    try:
+                        lm = page.get_by_text(re.compile(r"^Load more$|^Show more$|^Muat lainnya$", re.I))
+                        if await lm.count() > 0:
+                            lm_first = lm.first
+                            if await lm_first.is_visible():
+                                await lm_first.scroll_into_view_if_needed()
+                                await lm_first.click(timeout=8000)
+                                print(f"      [expand_detail] Clicked generic 'Load more' text (round {i+1})")
+                                await page.wait_for_timeout(2000)
+                                clicked = True
+                                consecutive_failures = 0
                     except:
                         pass
                 
@@ -658,7 +682,7 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
             # Try SDUI extraction first (most reliable on new LinkedIn layout)
             print("   Scraping from main section...")
             try:
-                sdui_main = await extract_new_layout_items(page, "MainView")
+                sdui_main = await extract_new_layout_items(page, "MainView", scope=section)
                 if sdui_main:
                     extracted_certs = [i.dict() for i in sdui_main]
                     print(f"   Got {len(extracted_certs)} certificates from MainView (SDUI)")
@@ -688,16 +712,34 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
                     has_show_all_btn = False
 
             # ALWAYS try to get full list from details page when logged in
-            # Main view typically only shows 3-4 certificates
+            # Main view typically only shows 2-3 certificates
             if not is_guest:
                 print("   🔄 Navigating to details page for full certificate list...")
                 
-                # First try: click show-all button if found
+                # First try: find show-all button and validate its href
                 show_all_btn = await find_show_all_button(section)
                 clicked_show_all = False
 
                 if show_all_btn and await show_all_btn.count() > 0:
-                    print(f"   ℹ️ Found 'Show all' button, clicking...")
+                    # Validate href points to certifications/licenses, not experience/etc
+                    href_backup = None
+                    try:
+                        href_backup = await show_all_btn.get_attribute("href")
+                    except Exception:
+                        pass
+                    
+                    href_is_cert = href_backup and any(
+                        k in href_backup.lower() for k in ["certif", "licens", "sertif"]
+                    )
+                    
+                    if href_is_cert:
+                        print(f"   ℹ️ Found 'Show all' button (href={href_backup[:60]}), clicking...")
+                    else:
+                        print(f"   ⚠️ Show all button href doesn't look like certs: {href_backup[:60] if href_backup else 'None'}")
+                        print(f"   ↪️ Skipping click, will navigate directly to details page")
+                        show_all_btn = None  # Skip clicking
+                
+                if show_all_btn and await show_all_btn.count() > 0:
                     try:
                         current_url = page.url
                         href_backup = await show_all_btn.get_attribute("href")
@@ -726,6 +768,15 @@ async def scrape_linkedin(data: LinkedInRequest) -> dict:
                                 ok_back, _ = await navigate_via_js(page, current_url, timeout_ms=15000)
                                 await page.wait_for_timeout(1500)
                                 clicked_show_all = False
+                            
+                            # Check if ended up on wrong details page (e.g., experience)
+                            if clicked_show_all and "details/" in page.url:
+                                if not any(k in page.url.lower() for k in ["certif", "licens"]):
+                                    print(f"   ⚠️ Landed on wrong details page: {page.url[:80]}")
+                                    debug_msg.append("WrongDetailsPage")
+                                    ok_back, _ = await navigate_via_js(page, current_url, timeout_ms=15000)
+                                    await page.wait_for_timeout(1500)
+                                    clicked_show_all = False
                     except Exception as e:
                         print(f"   ⚠️ Show all click failed: {e}")
                         debug_msg.append(f"ShowAllError: {str(e)[:30]}")
