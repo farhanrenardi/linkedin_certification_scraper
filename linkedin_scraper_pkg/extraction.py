@@ -262,6 +262,105 @@ async def extract_new_layout_items(
         print(f"[extraction.py] Strategy F error: {e}")
 
     # ------------------------------------------------------------------
+    # Strategy G – UL/LI elements fallback
+    # ------------------------------------------------------------------
+    if not results:
+        try:
+            lis = search_root.locator("li")
+            li_count = await lis.count()
+            if li_count > 0:
+                print(
+                    f"[extraction.py] Strategy G: {li_count} <li> elements "
+                    f"(source: {source})"
+                )
+                for m in range(li_count):
+                    try:
+                        li = lis.nth(m)
+                        text_content = ""
+                        try:
+                            text_content = await li.inner_text()
+                        except Exception:
+                            continue
+
+                        if not text_content or len(text_content.strip()) < 10:
+                            continue
+
+                        if _is_noise_text(text_content):
+                            continue
+
+                        verify_link = ""
+                        try:
+                            a_link = li.locator(
+                                "a[href*='learning/certificates'], "
+                                "a[href*='credential'], "
+                                "a[href*='redir/redirect'], "
+                                "a[href*='credly.com']"
+                            )
+                            if await a_link.count() > 0:
+                                href = await a_link.first.get_attribute("href")
+                                if href:
+                                    verify_link = (
+                                        href
+                                        if href.startswith("http")
+                                        else f"https://www.linkedin.com{href}"
+                                    )
+                        except Exception:
+                            pass
+
+                        # Must look like an actual certificate if strict
+                        if strict_filter and not _looks_like_cert(text_content, verify_link):
+                            continue
+
+                        result = _parse_cert_text(
+                            text_content, verify_link, source + "_LI"
+                        )
+                        if result and result.certificate_name not in seen_names:
+                            seen_names.add(result.certificate_name)
+                            results.append(result)
+                    except Exception:
+                        continue
+        except Exception as e:
+            print(f"[extraction.py] Strategy G error: {e}")
+
+    # ------------------------------------------------------------------
+    # Strategy H - Single Root Fallback (for 1 cert without lists/figures)
+    # ------------------------------------------------------------------
+    if not results:
+        try:
+            text_content = await search_root.inner_text()
+            if text_content and len(text_content.strip()) > 10:
+                verify_link = ""
+                try:
+                    a_link = search_root.locator(
+                        "a[href*='learning/certificates'], a[href*='credential'], "
+                        "a[href*='redir/redirect'], a[href*='credly.com']"
+                    )
+                    if await a_link.count() > 0:
+                        href = await a_link.first.get_attribute("href")
+                        if href:
+                            verify_link = href if href.startswith("http") else f"https://www.linkedin.com{href}"
+                except Exception:
+                    pass
+
+                # Strip common header
+                lines = [l.strip() for l in text_content.split('\n') if l.strip()]
+                if lines and re.search(r'Licenses|Sertif', lines[0], re.I):
+                    lines = lines[1:]
+                
+                if lines:
+                    cleaned_text = '\n'.join(lines)
+                    
+                    if (not strict_filter) or _looks_like_cert(cleaned_text, verify_link):
+                        if not _is_noise_text(cleaned_text):
+                            result = _parse_cert_text(cleaned_text, verify_link, source + "_RootSingle")
+                            if result and result.certificate_name not in seen_names:
+                                print(f"[extraction.py] Strategy H matched single root document")
+                                seen_names.add(result.certificate_name)
+                                results.append(result)
+        except Exception as e:
+            print(f"[extraction.py] Strategy H error: {e}")
+
+    # ------------------------------------------------------------------
     # Strategy A – see-license-button anchors (legacy, kept for compat)
     # ------------------------------------------------------------------
     if not results:

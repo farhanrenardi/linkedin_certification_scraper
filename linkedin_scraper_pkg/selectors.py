@@ -131,7 +131,7 @@ async def find_show_all_button(section: Locator) -> Locator | None:
     # Strategy 1b: Button/Link containing show/tampilkan text
     try:
         btn = section.locator("a, button").filter(
-            has_text=re.compile(r"show|tampilkan", re.I)
+            has_text=re.compile(r"show\s+(?:all|more)|tampilkan\s+(?:semua|lebih)", re.I)
         ).first
         if await btn.count() > 0:
             try:
